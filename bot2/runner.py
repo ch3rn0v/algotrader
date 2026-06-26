@@ -22,12 +22,17 @@ TO        = datetime(2026, 1, 1, tzinfo=timezone.utc)
 candles = get_candles(FIGI, TIMEFRAME, FROM, TO)
 print(f"Candles loaded: {len(candles)}")
 
-results = run_backtest(candles, fast_span=20, slow_span=50)
-equity  = results["equity"]
-trades  = results["trades"]
+results       = run_backtest(candles, bb_period=20, bb_std=2.0, time_stop_bars=12,
+                             session_start_utc=9, session_end_utc=12)
+equity        = results["equity"]
+trades        = results["trades"]
+peak_exposure = results["peak_exposure"]
 
-print(f"Trades: {len(trades)}")
-print(f"Final equity: {equity['equity'].iloc[-1]:,.2f}")
+pnl = equity["equity"].iloc[-1] - equity["equity"].iloc[0]
+print(f"Trades:         {len(trades)}")
+print(f"Total P&L:      {pnl:+,.2f}")
+print(f"Peak exposure:  {peak_exposure:,.2f}")
+print(f"Return:         {pnl/peak_exposure*100:+.2f}%" if peak_exposure > 0 else "Return: n/a")
 
-plot_results(equity, trades, symbol="SBERP", timeframe=TIMEFRAME,
+plot_results(candles, equity, trades, peak_exposure, symbol="SBERP", timeframe=TIMEFRAME,
              path=Path(__file__).parent / "result.png")
