@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Credentials
+.env
+
+# Candle cache and live run logs
+trading_bot/data/candles/
+trading_bot/data/logs/
+
+# Generated charts and metrics
+trading_bot/reports/
+
+# Pytest
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/

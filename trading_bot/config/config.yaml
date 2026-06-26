@@ -1,0 +1,47 @@
+instrument:
+  exchange: MOEX
+  symbol: SBER
+  figi: BBG004730N88
+  currency: RUB
+  lot_size: 10
+  timeframe: 15min
+
+strategy:
+  fast_ewm_span: 20            # EWMA span for fast trend line
+  slow_ewm_span: 50            # EWMA span for slow trend line
+  bb_period: 20
+  bb_std_mult: 2.0             # multiplier for the rolling std (SPEC 6.2)
+  entry_cooldown_bars: 4       # min bars between exit and next entry (SPEC 6.3)
+
+risk:
+  max_position_lots: 5
+
+backtest:
+  commission_bps: 5
+  min_commission_per_order: 0  # floor in instrument currency
+  participation_rate: 0.10     # max share of execution-window volume consumed
+  execution_window_minutes: 5  # K in SPEC 10.3
+  min_spread_bps: 2            # spread floor for liquid MOEX names
+  spread_to_range_ratio: 0.10  # spread ~= ratio * 1-min range
+  impact_coeff: 0.1            # square-root impact scalar
+  sigma_daily_window_days: 60  # rolling window for ex-ante daily volatility
+  initial_cash: 100000
+
+splits:
+  # Anchored to the run date; train + validation + test are contiguous,
+  # warmup_days extends before train and is excluded from every metric.
+  warmup_days: 30
+  train_months: 18
+  validation_months: 6
+  test_months: 12
+
+live:
+  reconcile_every_n_bars: 1    # poll broker position every N closed bars
+  startup_warmup_bars: null    # null => max(slow_ewm_span, bb_period) * 2
+  order_timeout_seconds: 30    # order beyond this is no longer in-flight
+  signal_log_close_history_bars: null  # null => max(slow_ewm_span, bb_period) + 5
+
+metrics:
+  sharpe_aggregation: daily    # aggregate equity to daily before annualizing
+  risk_free_annual: 0.16       # parameterized; recent CBR-key-rate-like value
+  return_method: simple        # simple daily returns; rf subtracted as daily rate
