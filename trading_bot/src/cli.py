@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 import time
 import uuid
@@ -72,10 +73,12 @@ def _cmd_backtest(args) -> int:
     end_dt = datetime.combine(load_end, datetime.min.time(), tzinfo=timezone.utc)
 
     try:
-        client = _maybe_client()
-        c15 = loader.load_candles(client, instrument, "15min", start_dt, end_dt)
-        c1m = loader.load_candles(client, instrument, "1min", start_dt, end_dt)
-        c1d = loader.load_candles(client, instrument, "1day", start_dt, end_dt)
+        raw = _maybe_client()
+        ctx = raw if raw is not None else contextlib.nullcontext()
+        with ctx as client:
+            c15 = loader.load_candles(client, instrument, "15min", start_dt, end_dt)
+            c1m = loader.load_candles(client, instrument, "1min", start_dt, end_dt)
+            c1d = loader.load_candles(client, instrument, "1day", start_dt, end_dt)
     except Exception as exc:
         print(f"data load error: {exc}", file=sys.stderr)
         return EXIT_RECOVERABLE

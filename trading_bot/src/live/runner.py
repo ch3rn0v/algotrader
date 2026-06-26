@@ -64,7 +64,8 @@ def _place_with_retry(client, account_id, instrument, signal_ts, target_position
 
 def process_bar(candle: dict, *, bot, strat_params, buffer, client, account_id, instrument, config, log):
     """Handle one closed candle (SPEC 8.3). Returns (bot, halted: bool)."""
-    bar_ts = pd.Timestamp(candle["timestamp"], tz="UTC")
+    t = pd.Timestamp(candle["timestamp"])
+    bar_ts = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
     # 1. Poll broker position; reconcile against intended (in-flight = 0 in v1 sync path).
     broker_pos = orders.get_position(client, account_id, instrument).quantity

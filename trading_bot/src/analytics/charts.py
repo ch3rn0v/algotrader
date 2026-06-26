@@ -28,7 +28,7 @@ def render_charts(df: pd.DataFrame, run_id: str, root: Path = _REPORTS) -> dict[
     rows = _eval_rows(df)
     out_dir = root / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts = pd.to_datetime(rows["timestamp"], utc=True)
+    ts = pd.to_datetime(rows["timestamp"], utc=True).dt.tz_convert(None)
     paths: dict[str, Path] = {}
 
     fig, ax = plt.subplots(figsize=(11, 4))

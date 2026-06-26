@@ -28,8 +28,13 @@ def _read_events(log_path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _utc(x) -> pd.Timestamp:
+    t = pd.Timestamp(x)
+    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+
+
 def _bar_of(ts_iso: str) -> pd.Timestamp:
-    return pd.Timestamp(ts_iso).tz_convert("UTC").floor("15min") if pd.Timestamp(ts_iso).tzinfo else pd.Timestamp(ts_iso, tz="UTC").floor("15min")
+    return _utc(ts_iso).floor("15min")
 
 
 def _fill_bar(ev: dict) -> pd.Timestamp:
@@ -37,9 +42,7 @@ def _fill_bar(ev: dict) -> pd.Timestamp:
     stamps (so the trade lands on the same bar as its position mark, keeping the
     log internally consistent); fall back to flooring the wall-clock ``ts``."""
     bar_ts = ev.get("bar_ts")
-    if bar_ts:
-        return pd.Timestamp(bar_ts, tz="UTC") if pd.Timestamp(bar_ts).tzinfo is None else pd.Timestamp(bar_ts).tz_convert("UTC")
-    return _bar_of(ev["ts"])
+    return _utc(bar_ts) if bar_ts else _bar_of(ev["ts"])
 
 
 def reconstruct(log_path, instrument: Instrument, *, assert_consistency: bool = True) -> pd.DataFrame:
@@ -55,7 +58,7 @@ def reconstruct(log_path, instrument: Instrument, *, assert_consistency: bool = 
     current_bar = None
     for ev in events:
         if ev.get("bar_ts"):
-            current_bar = pd.Timestamp(ev["bar_ts"], tz="UTC")
+            current_bar = _utc(ev["bar_ts"])
         if ev["type"] == "halt":
             halt_bar = current_bar if current_bar is not None else _bar_of(ev["ts"])
             break
@@ -67,16 +70,16 @@ def reconstruct(log_path, instrument: Instrument, *, assert_consistency: bool = 
     for ev in events:
         kind = ev["type"]
         if kind == "candle":
-            bar = pd.Timestamp(ev["bar_ts"], tz="UTC")
+            bar = _utc(ev["bar_ts"])
             rows[bar].update(
                 open=ev["o"], high=ev["h"], low=ev["l"], close=ev["c"],
                 volume=ev["v"], warmup_invalid=bool(ev.get("warmup_invalid", False)),
             )
         elif kind == "signal":
-            bar = pd.Timestamp(ev["bar_ts"], tz="UTC")
+            bar = _utc(ev["bar_ts"])
             rows[bar].update(signal=int(ev["value"]), target_position=float(ev["target_position"]))
         elif kind == "position":
-            bar = pd.Timestamp(ev["bar_ts"], tz="UTC")
+            bar = _utc(ev["bar_ts"])
             rows[bar].update(
                 position=float(ev["intended_position"]),
                 broker_position=ev.get("broker_position"),

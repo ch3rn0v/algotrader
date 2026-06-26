@@ -61,7 +61,7 @@ def read_cache(
     frames = [pd.read_parquet(f) for f in files]
     df = pd.concat(frames, ignore_index=True)
     ts = pd.to_datetime(df["timestamp"], utc=True)
-    mask = (ts >= pd.Timestamp(start, tz="UTC")) & (ts < pd.Timestamp(end, tz="UTC"))
+    mask = (ts >= pd.Timestamp(start)) & (ts < pd.Timestamp(end))
     return df.loc[mask].sort_values("timestamp").drop_duplicates("timestamp").reset_index(drop=True)
 
 
@@ -82,6 +82,12 @@ def load_candles(
     if not cached.empty and not refetch:
         return cached
 
+    if client is None:
+        raise RuntimeError(
+            f"No cached candles for {instrument.symbol} {interval} in the requested window "
+            f"and no broker client is available. "
+            f"Set TBANK_TOKEN in .env and re-run to download candle data."
+        )
     fetched = get_candles(client, instrument, start, end, interval)
     df = candles_to_df(fetched, instrument)
     _write_cache(df, instrument, interval, root)
