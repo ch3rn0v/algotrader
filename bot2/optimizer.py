@@ -1,13 +1,26 @@
 """Grid-search optimiser for BB mean reversion parameters.
 
-Usage (standalone):
-    python optimizer.py
+Usage:
+    source trading_bot/.venv/bin/activate
+
+    # defaults: SBERP, 5min, 2025, all CPUs
+    python3 bot2/optimizer.py
+
+    # custom dates and instrument
+    python3 bot2/optimizer.py --figi BBG004730N88 --timeframe 15min --from 2024-01-01 --to 2025-01-01
+
+    # fewer workers, sort by PnL, show top 20
+    python3 bot2/optimizer.py --jobs 4 --sort-by pnl --top 20
+
+    # custom output dir
+    python3 bot2/optimizer.py --out my_results
 
 Or from code:
     from optimizer import optimize
     results_df = optimize(candles, param_grid={...}, fixed_params={...})
 """
 
+import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
@@ -15,6 +28,10 @@ from itertools import product
 from pathlib import Path
 from typing import Optional
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from backtest_mean_rev_bb import run_backtest
@@ -27,6 +44,63 @@ def _run_one(args: tuple) -> dict:
     candles, params = args
     result = run_backtest(candles, **params, headless=True)
     return {**params, **result}
+
+
+_FMT = {
+    "pnl":           lambda v: f"{v:+,.0f}",
+    "sharpe":        lambda v: f"{v:.3f}",
+    "sortino":       lambda v: f"{v:.3f}",
+    "max_dd":        lambda v: f"{v:.3f}",
+    "cagr":          lambda v: f"{v:.3f}",
+    "n_trades":      lambda v: f"{v:.0f}",
+    "avg_bars_held": lambda v: f"{v:.1f}",
+    "turnover":      lambda v: f"{v:,.0f}",
+    "peak_exposure": lambda v: f"{v:,.0f}",
+}
+
+
+def _render_table(df: pd.DataFrame, result_cols: list, path: Path) -> None:
+    """Save a color-coded table as a PNG (RdYlGn per result column)."""
+    cmap = plt.cm.RdYlGn
+    norms = {
+        col: (df[col].min(), df[col].max())
+        for col in result_cols if col in df.columns
+    }
+
+    def _color(col, val):
+        if col not in norms or not np.isfinite(val):
+            return (1.0, 1.0, 1.0, 1.0)
+        mn, mx = norms[col]
+        t = (val - mn) / (mx - mn) if mx > mn else 0.5
+        return cmap(t)
+
+    cell_text, cell_colors = [], []
+    for _, row in df.iterrows():
+        txt, clr = [], []
+        for col in df.columns:
+            val = row[col]
+            fmt_fn = _FMT.get(col)
+            txt.append(fmt_fn(val) if fmt_fn and pd.notna(val) else ("—" if pd.isna(val) else str(val)))
+            clr.append(_color(col, val) if col in result_cols else (1.0, 1.0, 1.0, 1.0))
+        cell_text.append(txt)
+        cell_colors.append(clr)
+
+    n_rows, n_cols = len(df), len(df.columns)
+    fig, ax = plt.subplots(figsize=(max(12, n_cols * 1.4), max(4, n_rows * 0.28 + 1)))
+    ax.axis("off")
+    tbl = ax.table(
+        cellText=cell_text,
+        colLabels=list(df.columns),
+        cellColours=cell_colors,
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(7)
+    tbl.auto_set_column_width(range(n_cols))
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def optimize(
@@ -78,25 +152,26 @@ def optimize(
     out_dir.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_dir / "results.csv", index=False)
 
-    fmt = {
-        "pnl": "{:+,.0f}",
-        "sharpe": "{:.3f}",
-        "sortino": "{:.3f}",
-        "max_dd": "{:.3f}",
-        "cagr": "{:.3f}",
-        "n_trades": "{:.0f}",
-        "avg_bars_held": "{:.1f}",
-        "turnover": "{:,.0f}",
-        "peak_exposure": "{:,.0f}",
-    }
-    styled = df.style.format({k: v for k, v in fmt.items() if k in df.columns}, na_rep="—").background_gradient(subset=result_cols, cmap="RdYlGn", axis=0)
-    styled.to_html(out_dir / "results.html")
-    print(f"Saved: {out_dir}/results.{{csv,html}}")
+    top_n = min(60, len(df))
+    display_df = df.sort_values("sharpe", ascending=False).head(top_n)
+    _render_table(display_df, result_cols, out_dir / "results.png")
+    print(f"Saved: {out_dir}/results.{{csv,png}}")
 
-    return styled
+    return df
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="BB mean reversion grid optimiser")
+    parser.add_argument("--figi", default="BBG0047315Y7", help="Instrument FIGI (default: SBERP)")
+    parser.add_argument("--timeframe", default="5min", help="Candle timeframe (default: 5min)")
+    parser.add_argument("--from", dest="date_from", default="2025-01-01", metavar="DATE", help="Start date YYYY-MM-DD (default: 2025-01-01)")
+    parser.add_argument("--to", dest="date_to", default="2026-01-01", metavar="DATE", help="End date YYYY-MM-DD (default: 2026-01-01)")
+    parser.add_argument("--jobs", type=int, default=None, help="Parallel workers (default: all CPUs)")
+    parser.add_argument("--sort-by", default="sharpe", help="Result column to sort top-N by (default: sharpe)")
+    parser.add_argument("--top", type=int, default=10, help="Rows to print (default: 10)")
+    parser.add_argument("--out", default="optimizer_output", metavar="DIR", help="Output directory (default: optimizer_output)")
+    args = parser.parse_args()
+
     _env = Path(__file__).parent.parent / "trading_bot" / ".env"
     if _env.exists():
         for line in _env.read_text().splitlines():
@@ -104,15 +179,13 @@ if __name__ == "__main__":
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-    candles = get_candles(
-        "BBG0047315Y7",
-        "5min",
-        datetime(2025, 1, 1, tzinfo=timezone.utc),
-        datetime(2026, 1, 1, tzinfo=timezone.utc),
-    )
+    from_dt = datetime.strptime(args.date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    to_dt = datetime.strptime(args.date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    candles = get_candles(args.figi, args.timeframe, from_dt, to_dt)
     print(f"Candles: {len(candles)}")
 
-    styled = optimize(
+    results = optimize(
         candles,
         param_grid={
             "bb_period": [10, 15, 20, 25, 30],
@@ -125,9 +198,11 @@ if __name__ == "__main__":
             "width_lookback": 50,
             "position_size": 1,
         },
-        out_dir=Path(__file__).parent / "optimizer_output",
+        n_jobs=args.jobs,
+        out_dir=Path(__file__).parent / args.out,
     )
 
-    top = styled.data.sort_values("sharpe", ascending=False).head(10)
-    print("\nTop 10 by Sharpe:")
+    sort_col = args.sort_by if args.sort_by in results.columns else "sharpe"
+    top = results.sort_values(sort_col, ascending=False).head(args.top)
+    print(f"\nTop {args.top} by {sort_col}:")
     print(top.to_string(index=False))
