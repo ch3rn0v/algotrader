@@ -10,6 +10,7 @@ Or from code:
 
 import os
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ from typing import Optional
 import pandas as pd
 
 from backtest_mean_rev_bb import run_backtest
+from candles import get_candles
 
 RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "turnover", "peak_exposure"]
 
@@ -95,10 +97,6 @@ def optimize(
 
 
 if __name__ == "__main__":
-    import os
-    from datetime import datetime, timezone
-    from candles import get_candles
-
     _env = Path(__file__).parent.parent / "trading_bot" / ".env"
     if _env.exists():
         for line in _env.read_text().splitlines():
