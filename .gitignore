@@ -26,3 +26,6 @@ trading_bot/reports/
 # IDE
 .idea/
 .vscode/
+
+# Other
+*TODO.md
