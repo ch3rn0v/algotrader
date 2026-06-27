@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from candles import get_candles
-from backtest import run_backtest
+from backtest_mean_rev_bb import run_backtest
 from charts import plot_results
 
 # Load .env from trading_bot/
