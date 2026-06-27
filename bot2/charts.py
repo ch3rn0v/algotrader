@@ -81,7 +81,7 @@ def plot_results(
     # --- Titles ---
     label = f"{symbol} {timeframe}".strip()
     title_bh = (
-        f"{label} — Buy & Hold\n"
+        f"{label}\n"
         f"PnL: {bh_pnl_pct:+.2f}%"
         f" | Sharpe: {bh_sharpe:.2f}"
         f" | Sortino: {bh_sortino:.2f}"
@@ -108,7 +108,7 @@ def plot_results(
 
     fig, axes = plt.subplots(
         4, 1, figsize=(12, 12), sharex=True,
-        gridspec_kw={"height_ratios": [2, 2, 1, 1]},
+        gridspec_kw={"height_ratios": [1.5, 1.5, 1, 1]},
     )
     ax0, ax1, ax2, ax3 = axes
 
