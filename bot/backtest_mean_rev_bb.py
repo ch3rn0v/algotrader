@@ -165,7 +165,8 @@ def run_backtest(
             neg = daily_ret[daily_ret < 0]
             s_std = float(neg.std()) if len(neg) > 1 else 0.0
             sortino = mean_r / s_std * np.sqrt(252) if s_std > 0 else 0.0
-            cagr = (1 + pnl / peak_exposure) ** (365 / n_days) - 1
+            base = 1 + pnl / peak_exposure
+            cagr = base ** (365 / n_days) - 1 if base > 0 else -1.0
             max_dd = max_dd_abs / peak_exposure
         else:
             sharpe = sortino = cagr = max_dd = 0.0

@@ -35,7 +35,8 @@ def plot_results(
 
     if peak_exposure > 0:
         ret_pct = pnl / peak_exposure * 100
-        cagr = (1 + pnl / peak_exposure) ** (365 / n_days) - 1
+        base = 1 + pnl / peak_exposure
+        cagr = base ** (365 / n_days) - 1 if base > 0 else -1.0
         daily_eq = equity.set_index("timestamp")["equity"].resample("D").last().ffill().dropna()
         daily_ret = daily_eq.diff().dropna() / peak_exposure
         running_max = eq.cummax()
