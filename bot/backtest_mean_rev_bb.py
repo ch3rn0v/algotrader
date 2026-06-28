@@ -55,7 +55,7 @@ def run_backtest(
     # Setting desired=0 here causes the exit to execute at the following bar's open.
     is_session_end = np.empty(len(df), dtype=bool)
     is_session_end[:-1] = session_a[:-1] & ~session_a[1:]
-    is_session_end[-1] = bool(session_a[-1])
+    is_session_end[-1] = False  # last bar is already covered by is_last_bar[-1]
 
     closes = df["close"].to_numpy()
     opens = df["open"].to_numpy()
