@@ -166,14 +166,14 @@ def main():
     feature_cols = [c for c in features.columns if c not in ts_cols and c != "target"]
     print(f"Feature matrix: {len(features)} rows × {len(feature_cols)} features")
 
-    X = features[feature_cols].to_numpy()
+    X = features[feature_cols]
     y = features["target"].to_numpy()
 
     # 4. Temporal train/test split — no shuffling
     split = int(len(features) * TRAIN_RATIO)
     if split == 0:
         raise RuntimeError(f"TRAIN_RATIO={TRAIN_RATIO} yields 0 training rows from {len(features)} total. " f"Increase TRAIN_RATIO or extend the date range.")
-    X_train, X_test = X[:split], X[split:]
+    X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y[:split], y[split:]
     print(f"\nTrain: {len(X_train)} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
     print(f"Test:  {len(X_test)} rows  ({features['timestamp'].iloc[split]} → {features['timestamp'].iloc[-1]})")
