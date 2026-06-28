@@ -1,124 +1,90 @@
-# Bot
+# algotrader
+
+A Python algorithmic trading system for MOEX via the T-Bank (ex-Tinkoff) Invest API.
+Includes a Bollinger Band mean-reversion backtest, a grid optimizer, and a LightGBM price-prediction model.
 
 ## Setup
 
-`python3 -m venv /path/to/new/virtual/environment`
-`source ./.venv/bin/activate`
-`pip install git+https://github.com/RussianInvestments/invest-python --no-deps`
-
-
-# Trading Bot
-
-A functional-style Python trading bot for the T-Bank (ex-Tinkoff) Invest API,
-paired with a backtester that shares its strategy logic. A live run and a
-backtest of the same strategy over the same window produce directly comparable
-results.
-
-The v1 strategy is **trend-filtered mean reversion**: a slow/fast EWMA cross
-acts as a regime filter, and Bollinger-Band touches trigger reversion entries
-taken only in the direction the regime allows. It trades a single MOEX equity
-on 15-minute candles during the main equity session (10:00–18:40 MSK).
-
-## Setup
-
-Requires Python 3.11+.
+Requires Python 3.10+.
 
 ```bash
-pip install -e .            # installs pandas, numpy, pyarrow, pydantic, matplotlib, tinkoff-investments
-cp .env.example .env        # then fill in TBANK_TOKEN and TBANK_ACCOUNT_ID
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install git+https://github.com/RussianInvestments/invest-python.git --no-deps
 ```
 
-Edit `config/config.yaml` for the instrument, strategy parameters, risk limits,
-backtest execution model, and train/validation/test split durations. Secrets
-live in `.env` only, never in the config.
+Create `bot/.env` with your T-Bank token (never commit this file):
 
-## CLI
+```
+TBANK_TOKEN=t.your_token_here
+```
 
-All commands are run from the project root as `python -m src.cli <command>`.
-Exit codes: `0` success, `1` recoverable failure, `2` operator-attention
-required (e.g. live halt on discrepancy), `3` usage error.
+The token is loaded automatically at import time by `candles.py`.
 
+## Files
+
+| File | Purpose |
+|---|---|
+| `bot/candles.py` | Fetch OHLCV candles from T-Bank API with local CSV cache (`bot/cache/`) |
+| `bot/backtest_mean_rev_bb.py` | Bollinger Band mean-reversion backtest; supports headless mode for grid search |
+| `bot/charts.py` | Four-panel chart: asset price+volume, equity curve, position, trading volume |
+| `bot/runner.py` | Run a single backtest and save chart to `outputs/backtest/` |
+| `bot/optimizer.py` | Parallel grid search over BB parameters; saves CSV + HTML to `outputs/optimizer/` |
+| `bot/train_lgbm.py` | Train a LightGBM model to predict the next 5-min close; saves model to `outputs/models/` |
+| `bot/find_figi.py` | Look up instrument FIGIs by ticker via the T-Bank API |
+
+## Usage
+
+All commands run from the repo root with the venv activated.
+
+**Single backtest:**
 ```bash
-# Backtest a named split (with its warmup prefix) or an explicit window.
-python -m src.cli backtest --config config/config.yaml --split train
-python -m src.cli backtest --config config/config.yaml --from 2024-01-01 --to 2024-06-30
-
-# Run the live bot (stream-driven; stop with SIGINT/SIGTERM).
-python -m src.cli run --config config/config.yaml
-
-# Exit-to-zero safety command (used after a halt or at end of day).
-python -m src.cli flat --config config/config.yaml --confirm
-
-# Regenerate charts + metrics.json from a live run log.
-python -m src.cli report --log data/logs/<run_id>.jsonl
-
-# Overlay a live run against a backtest of the same logged candles.
-python -m src.cli compare --log data/logs/<run_id>.jsonl
+python3 bot/runner.py
 ```
 
-`backtest` takes either `--split` or `--from/--to`, never both. `report` and
-`compare` operate on existing JSONL logs and write PNGs under `reports/`.
-
-## Architecture
-
-One **canonical row schema** (one candle for one instrument) is shared by
-backtest output and live-log reconstruction, so all downstream analytics
-consume a single contract regardless of source.
-
-- `src/core/` — pure, side-effect-free logic: indicators (lagged EWMA +
-  Bollinger Bands), the signal state machine, the MOEX session predicate,
-  candle normalization, and shared types.
-- `src/broker/` — the only module that performs network I/O against T-Bank
-  (candle fetch/stream, market orders, position reads).
-- `src/live/` — the stream-driven runner, its executor, in-memory bot state,
-  and the append-only JSONL event log (the source of truth for live runs).
-- `src/backtest/` — the pandas row-loop engine, the volume-aware execution
-  simulator, the historical-candle loader/cache, and split helpers.
-- `src/analytics/` — metrics, log reconstruction, matplotlib charts, and the
-  live-vs-backtest comparison, all consuming the canonical schema.
-
-Side effects are confined to `broker/` (network) and `event_log.py` (disk);
-everything else is pure. State flows through `NamedTuple`/`TypedDict`/dicts —
-no custom business-logic classes. All internal timestamps are UTC, with the
-canonical convention that a row's `timestamp` is the **open** of its bar.
-
-### No-lookahead discipline
-
-Indicators feeding signal generation are lagged one bar, so the signal at row
-*t* depends only on data observable before bar *t* opens, plus *t*'s close as
-the trigger that pierces a pre-existing band. Execution fields carry a
-`_from_prev` suffix: a fill recorded on row *t* was caused by the signal
-computed on row *t-1*. Mutation-form and step-jump-form tests enforce this.
-
-## Documented limitations (v1)
-
-These are explicit scope decisions, several of which should be revisited in v2:
-
-- **No stop-loss.** The regime filter and the `flat` command are the only
-  protections against adverse moves.
-- **Single instrument.** The schema is multi-instrument-ready, but no engine
-  or executor path handles more than one.
-- **Fixed session calendar.** The session predicate uses weekday + time logic
-  only; MOEX half-days and exchange holidays are not modeled. The operator
-  must stop the bot on those days.
-- **No remote kill-switch.** v1 stops via `SIGINT`/`SIGTERM` only.
-- **Spread is modeled, not measured.** With no order-book data, spread is
-  inferred from 1-minute ranges; square-root impact uses a placeholder
-  coefficient. The execution model is deterministic (no stochastic fills).
-- **Single-run reconstruction.** Cross-run reconciliation across halts,
-  `flat` runs, and resumes spanning multiple `run_id`s is out of scope.
-- **Volume-unit assumption.** The canonical schema assumes candle `volume`
-  arrives in lots; the broker layer documents and verifies this per instrument
-  and normalizes at ingestion if needed.
-
-## Testing
-
-The pure core ships with a test suite covering indicator lag/EWMA parity, the
-36-entry signal state machine, the cooldown/mid-cross gate, the execution
-simulator, session boundaries, splits, no-lookahead invariants, and the
-event-log round-trip.
-
+**Grid optimizer:**
 ```bash
-python -m pytest tests/          # if pytest is installed
-python tests/run_tests.py        # otherwise, the bundled pytest-free runner
+python3 bot/optimizer.py
+python3 bot/optimizer.py --figi BBG004730N88 --timeframe 15min --from 2024-01-01 --to 2025-01-01
+python3 bot/optimizer.py --jobs 4 --out outputs/my_run
 ```
+
+**Train LightGBM model:**
+```bash
+python3 bot/train_lgbm.py
+```
+
+**Look up a FIGI:**
+```bash
+python3 bot/find_figi.py SBERP
+python3 bot/find_figi.py PLZL
+python3 bot/find_figi.py IMOEX
+```
+
+## Strategy
+
+Bollinger Band mean reversion, targeting the choppy MOEX midday session (12:00–15:00 MSK = 09:00–12:00 UTC):
+
+- Enter long when close < lower band; enter short when close > upper band
+- Only enter when BB width is below its rolling median (ranging market)
+- Exit at the midband, after `time_stop_bars`, or at session end
+- Flatten all positions at end of day
+- Execution: signal on close, fill at next bar's open (market taker)
+- Fee: 0.05% per side (T-Bank Trader tariff + MOEX exchange fee — verify before live use)
+
+## No-lookahead discipline
+
+- Backtest: signals computed on bar close, executed at next bar's open
+- LightGBM features: primary 5m series uses close[t] to predict close[t+1]; all other series (other assets or higher timeframes) are merged on bar-end timestamp so only completed bars are visible at each decision point
+
+## Outputs
+
+All outputs are git-ignored.
+
+| Path | Contents |
+|---|---|
+| `bot/cache/` | Candle CSV cache, one file per FIGI+timeframe |
+| `bot/outputs/backtest/` | `result.png` from `runner.py` |
+| `bot/outputs/optimizer/` | `results_<ticker>_<tf>.{csv,html}` from `optimizer.py` |
+| `bot/outputs/models/` | `lgbm_<timestamp>.txt` + `lgbm_<timestamp>_meta.json` from `train_lgbm.py` |
