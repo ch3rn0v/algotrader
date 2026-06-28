@@ -71,7 +71,7 @@ def run_backtest(
         total_bars_held = 0
         turnover        = 0.0
         total_fees      = 0.0
-        daily_eq_vals   = []
+        daily_eq_vals   = [float(initial_cash)]  # seed with t=0 so first day's return isn't dropped
         _prev_date      = None
         _last_eq        = float(initial_cash)
     else:
