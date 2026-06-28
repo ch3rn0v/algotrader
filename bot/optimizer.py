@@ -7,8 +7,8 @@ Usage:
     # custom dates and instrument
     python3 bot/optimizer.py --figi BBG004730N88 --timeframe 15min --from 2024-01-01 --to 2025-01-01
 
-    # fewer workers, sort by PnL, show top 20
-    python3 bot/optimizer.py --jobs 4 --sort-by pnl --top 20
+    # fewer workers
+    python3 bot/optimizer.py --jobs 4
 
     # custom output dir
     python3 bot/optimizer.py --out outputs/my_results
@@ -161,46 +161,6 @@ th:hover {{ filter: brightness(0.92); }}
     path.write_text(html, encoding="utf-8")
 
 
-def _render_table(df: pd.DataFrame, result_cols: list, path: Path) -> None:
-    """Save a color-coded table as a PNG (RdYlGn per result column)."""
-    cmap = plt.cm.RdYlGn
-    norms = {col: (df[col].min(), df[col].max()) for col in result_cols if col in df.columns}
-
-    def _color(col, val):
-        if col not in norms or not np.isfinite(val):
-            return (1.0, 1.0, 1.0, 1.0)
-        mn, mx = norms[col]
-        t = (val - mn) / (mx - mn) if mx > mn else 0.5
-        return cmap(t)
-
-    cell_text, cell_colors = [], []
-    for _, row in df.iterrows():
-        txt, clr = [], []
-        for col in df.columns:
-            val = row[col]
-            fmt_fn = _FMT.get(col)
-            txt.append(fmt_fn(val) if fmt_fn and pd.notna(val) else ("—" if pd.isna(val) else str(val)))
-            clr.append(_color(col, val) if col in result_cols else (1.0, 1.0, 1.0, 1.0))
-        cell_text.append(txt)
-        cell_colors.append(clr)
-
-    n_rows, n_cols = len(df), len(df.columns)
-    fig, ax = plt.subplots(figsize=(max(12, n_cols * 1.4), max(4, n_rows * 0.28 + 1)))
-    ax.axis("off")
-    tbl = ax.table(
-        cellText=cell_text,
-        colLabels=list(df.columns),
-        cellColours=cell_colors,
-        loc="center",
-        cellLoc="center",
-    )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(7)
-    tbl.auto_set_column_width(range(n_cols))
-    fig.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
 
 def optimize(
     candles: pd.DataFrame,
@@ -209,14 +169,12 @@ def optimize(
     n_jobs: Optional[int] = None,
     out_dir: Path = Path("outputs/optimizer"),
     label: str = "",
-    top_n: int = 30,
 ) -> pd.DataFrame:
     """
     Cartesian-product grid search, parallelised across CPU cores.
 
     Returns a plain DataFrame sorted by sortino descending.
-    Also writes results_{label}.csv and results_{label}.png to out_dir.
-    The PNG shows the top_n rows with RdYlGn coloring per result column.
+    Also writes results_{label}.csv and results_{label}.html to out_dir.
 
     Parameters
     ----------
@@ -226,7 +184,6 @@ def optimize(
     n_jobs      : worker processes (default: all CPUs)
     out_dir     : directory for output files
     label       : ticker+timeframe tag used in output filenames
-    top_n       : rows shown in the PNG (default: 30)
     """
     fixed = fixed_params or {}
     keys = list(param_grid.keys())
@@ -262,10 +219,8 @@ def optimize(
     sweep_cols = [c for c in param_grid.keys() if c in df.columns]
     color_cols = sweep_cols + result_cols
 
-    display_df = df.head(top_n)
-    _render_table(display_df, result_cols, out_dir / f"{stem}.png")
     _write_html(df, color_cols, out_dir / f"{stem}.html")
-    print(f"Saved: {out_dir}/{stem}.{{csv,png,html}}")
+    print(f"Saved: {out_dir}/{stem}.{{csv,html}}")
 
     return df
 
@@ -277,8 +232,6 @@ if __name__ == "__main__":
     parser.add_argument("--from", dest="date_from", default="2025-01-01", metavar="DATE", help="Start date YYYY-MM-DD (default: 2025-01-01)")
     parser.add_argument("--to", dest="date_to", default="2026-01-01", metavar="DATE", help="End date YYYY-MM-DD (default: 2026-01-01)")
     parser.add_argument("--jobs", type=int, default=None, help="Parallel workers (default: all CPUs)")
-    parser.add_argument("--sort-by", default="sortino", help="Result column to sort top-N by (default: sortino)")
-    parser.add_argument("--top", type=int, default=20, help="Rows to print (default: 20)")
     parser.add_argument("--out", default="outputs/optimizer", metavar="DIR", help="Output directory (default: outputs/optimizer)")
     args = parser.parse_args()
 
@@ -303,6 +256,5 @@ if __name__ == "__main__":
             "position_size": 1,
         },
         n_jobs=args.jobs,
-        out_dir=Path(__file__).parent / args.out,  # e.g. bot/outputs/optimizer
-        top_n=args.top,
+        out_dir=Path(__file__).parent / args.out,
     )
