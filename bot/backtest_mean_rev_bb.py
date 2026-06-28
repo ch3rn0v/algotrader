@@ -27,9 +27,9 @@ def run_backtest(
     position_size: int = 1,
     initial_cash: float = 100_000.0,
     headless: bool = False,
-    # Estimated market-taker fee per side (applied to each fill's notional).
-    # T-Bank Trader tariff: 0.04% broker + ~0.01% MOEX exchange taker fee = 0.05%.
-    # Source: tbank.ru/invest/tariffs (as of 2025); verify before live use.
+    # Market-taker fee per side (applied to each fill's notional).
+    # T-Bank Trader tariff: 0.05%.
+    # Source: https://www.tbank.ru/invest/tariffs/; verify before live use.
     fee_rate: float = 0.0005,
 ) -> dict:
     df = candles.copy().reset_index(drop=True)
