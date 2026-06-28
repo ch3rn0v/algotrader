@@ -19,6 +19,7 @@ trading_bot/data/logs/
 # Generated charts and metrics
 trading_bot/reports/
 *.png
+*.html
 
 # Pytest
 .pytest_cache/
