@@ -225,6 +225,7 @@ def main():
         "from": FROM.isoformat(),
         "to": TO.isoformat(),
         "train_ratio": TRAIN_RATIO,
+        "train_end_ts": str(features["timestamp"].iloc[split - 1]),
         "n_train": len(X_train),
         "n_test": len(X_test),
         "feature_cols": feature_cols,

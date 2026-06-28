@@ -6,7 +6,7 @@ Strategy:
   - Only enter when the market is ranging: BB width is below its own rolling median.
   - Exit at the middle band (mean reversion target), after `time_stop_bars`, or at session end.
   - Flatten at the last bar of each day regardless.
-  - Signals execute at the *next* bar's open.
+  - Decision uses the *previous* bar's completed data; execution is at the *current* bar's open.
 
 headless=True skips per-bar list accumulation; returns a flat stats dict instead of
 equity/trades DataFrames. Use this for grid search / optimisation loops.
@@ -31,6 +31,11 @@ def run_backtest(
     # T-Bank Trader tariff: 0.05%.
     # Source: https://www.tbank.ru/invest/tariffs/; verify before live use.
     fee_rate: float = 0.0005,
+    # Optional array of model predictions aligned with candles.
+    # predictions[i] is the predicted close[i]/close[i-1] for bar i.
+    # When provided, only enter long if pred > 1.0 and only enter short if pred < 1.0.
+    # When None, the plain BB signal is used with no model filter.
+    predictions: np.ndarray | None = None,
 ) -> dict:
     df = candles.copy().reset_index(drop=True)
 
@@ -52,10 +57,9 @@ def run_backtest(
     session_a = in_session.to_numpy()
 
     # Last in-session bar: session is True now and False on the next bar (or last bar overall).
-    # Setting desired=0 here causes the exit to execute at the following bar's open.
     is_session_end = np.empty(len(df), dtype=bool)
     is_session_end[:-1] = session_a[:-1] & ~session_a[1:]
-    is_session_end[-1] = False  # last bar is already covered by is_last_bar[-1]
+    is_session_end[-1] = False
 
     closes = df["close"].to_numpy()
     opens = df["open"].to_numpy()
@@ -88,26 +92,56 @@ def run_backtest(
         total_fees = 0.0
 
     for i in range(len(df)):
-        # Execute prior bar's signal at this bar's open
+        # Decide desired position using the previous bar's completed data.
         if i > 0:
-            delta = desired - position
-            if delta != 0:
-                prev_pos = position
-                notional = abs(delta) * opens[i]
-                fee = notional * fee_rate
-                total_fees += fee
-                cash -= delta * opens[i] + fee  # settle the trade at this bar's open
-                position += delta  # reflect the new position
-                if position != 0:
-                    entry_bar = i
-                peak_exposure = max(peak_exposure, abs(position) * opens[i])
-                if headless:
-                    if prev_pos == 0 and position != 0:
-                        n_entries += 1
-                    n_trades += 1
-                    turnover += notional
+            p = i - 1
+            if np.isnan(mid_a[p]) or is_last_bar[p] or is_session_end[p]:
+                desired = 0
+            elif position != 0:
+                bars_held = i - entry_bar
+                hit_midband = (position > 0 and closes[p] >= mid_a[p]) or \
+                              (position < 0 and closes[p] <= mid_a[p])
+                if hit_midband or bars_held >= time_stop_bars:
+                    desired = 0
                 else:
-                    trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i], "fee": fee})
+                    desired = position
+            elif session_a[p] and ranging_a[p]:
+                if predictions is not None:
+                    pred = float(predictions[i])
+                    want_long = closes[p] < lower_a[p] and pred > 1.0
+                    want_short = closes[p] > upper_a[p] and pred < 1.0
+                else:
+                    want_long = closes[p] < lower_a[p]
+                    want_short = closes[p] > upper_a[p]
+                if want_long:
+                    desired = position_size
+                elif want_short:
+                    desired = -position_size
+                else:
+                    desired = 0
+            else:
+                desired = 0
+        # i == 0: no previous bar, desired stays 0
+
+        # Execute at this bar's open.
+        delta = desired - position
+        if delta != 0:
+            prev_pos = position
+            notional = abs(delta) * opens[i]
+            fee = notional * fee_rate
+            total_fees += fee
+            cash -= delta * opens[i] + fee
+            position += delta
+            if position != 0:
+                entry_bar = i
+            peak_exposure = max(peak_exposure, abs(position) * opens[i])
+            if headless:
+                if prev_pos == 0 and position != 0:
+                    n_entries += 1
+                n_trades += 1
+                turnover += notional
+            else:
+                trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i], "fee": fee})
 
         eq_val = cash + position * closes[i]
 
@@ -127,26 +161,6 @@ def run_backtest(
                 total_bars_held += 1
         else:
             equity_rows.append({"timestamp": timestamps[i], "equity": eq_val, "position": position})
-
-        # Signal for next bar
-        if np.isnan(mid_a[i]) or is_last_bar[i] or is_session_end[i]:
-            desired = 0
-        elif position != 0:
-            bars_held = i - entry_bar
-            hit_midband = (position > 0 and closes[i] >= mid_a[i]) or (position < 0 and closes[i] <= mid_a[i])
-            if hit_midband or bars_held >= time_stop_bars:
-                desired = 0
-            else:
-                desired = position
-        elif session_a[i] and ranging_a[i]:
-            if closes[i] < lower_a[i]:
-                desired = position_size
-            elif closes[i] > upper_a[i]:
-                desired = -position_size
-            else:
-                desired = 0
-        else:
-            desired = 0
 
     # --- Return ---
     if headless:
