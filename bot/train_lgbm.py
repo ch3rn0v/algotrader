@@ -39,13 +39,14 @@ TRAIN_RATIO = 0.3  # first 30% for training, last 70% for test
 
 MODEL_DIR = Path(__file__).parent / "outputs" / "models"
 
+max_depth = 4
 LGBM_PARAMS = {
     "objective": "regression",
     "metric": "rmse",
-    "n_estimators": 100,
-    "max_depth": 4,
+    "n_estimators": 200,
+    "max_depth": max_depth,
     "learning_rate": 0.05,
-    "num_leaves": 15,
+    "num_leaves": 2**max_depth,
     "random_state": 0,
     "verbosity": -1,
 }
