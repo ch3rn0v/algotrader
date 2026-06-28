@@ -16,6 +16,10 @@ trading_bot/data/candles/
 trading_bot/data/logs/
 *.csv
 
+# Models
+*.txt
+*meta.json
+
 # Generated charts and metrics
 trading_bot/reports/
 *.png

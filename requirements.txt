@@ -1,6 +1,7 @@
 numpy==2.5.0
 pandas==3.0.3
 matplotlib==3.11.0
+scikit-learn>=1.9
 lightgbm==4.6.0
 
 # T-Bank Invest API — install from source, not PyPI (the PyPI package is an old REST client)

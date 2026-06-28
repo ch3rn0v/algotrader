@@ -1,8 +1,8 @@
-"""Train a LightGBM model to predict the next 5-min close price of SBERP.
+"""Train a LightGBM model to predict the current 5-min bar's return for SBERP.
 
-Features: OHLCV-derived features for SBERP, IMOEX, PLZL at 5m, 15m, 30m, 1h timeframes.
-Target:   close price of the next 5-min bar.
-Metric:   Pearson correlation (np.corrcoef) between predicted and actual next close.
+Features: OHLCV-derived features for SBERP, TMOS, PLZL at 5m, 15m, 30m, 1h timeframes.
+Target:   close[t] / close[t-1] — return of the current 5-min bar.
+Metric:   Pearson correlation (np.corrcoef) between predicted and actual return.
 
 Usage (from repo root, with venv activated):
     python3 bot/train_lgbm.py
@@ -78,8 +78,8 @@ def _raw_features(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
 def build_features(all_candles: dict) -> pd.DataFrame:
     """Merge features from all (asset, timeframe) pairs onto the primary 5m index.
 
-    Primary series (SBERP 5m): merged on bar start timestamp. Using close[t] as
-    a feature to predict close[t+1] is valid — bar t is already complete.
+    Primary series (SBERP 5m): feature values are shifted by one bar so that at
+    decision time (start of bar t) only bar t-1 data is visible. Target is close[t]/close[t-1].
 
     All other series: merged on bar END timestamp (start + duration). This ensures
     only fully completed bars are visible at each decision point. A bar ending
@@ -97,8 +97,12 @@ def build_features(all_candles: dict) -> pd.DataFrame:
         feats = _raw_features(df, prefix)
 
         if asset == PRIMARY_ASSET and tf == PRIMARY_TF:
-            # Merge directly on bar start: no lookahead since target is close[t+1].
-            result = pd.merge_asof(result, feats, on="timestamp", direction="backward")
+            # Target is close[t]/close[t-1], so features must only use bar t-1 data.
+            # Shift feature values forward by one bar; timestamp stays as the merge key.
+            feat_cols = [c for c in feats.columns if c != "timestamp"]
+            feats_prev = feats[["timestamp"]].copy()
+            feats_prev.loc[:, feat_cols] = feats[feat_cols].shift(1).values
+            result = pd.merge_asof(result, feats_prev, on="timestamp", direction="backward")
         else:
             # Replace timestamp with bar end so merge_asof only matches completed bars.
             # {prefix}_ts retains the original bar start for traceability.
@@ -134,7 +138,7 @@ def main():
     print("\nBuilding features...")
     features = build_features(all_candles)
     primary = all_candles[(PRIMARY_ASSET, PRIMARY_TF)].sort_values("timestamp").reset_index(drop=True)
-    features.loc[:, "target"] = primary["close"].shift(-1).values  # next 5m close
+    features.loc[:, "target"] = (primary["close"] / primary["close"].shift(1)).values
 
     n_before = len(features)
 
