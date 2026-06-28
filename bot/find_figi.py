@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from tinkoff.invest import Client, InstrumentIdType
+from tinkoff.invest.exceptions import RequestError
 
 # Load .env so the script works standalone (same as candles.py does at import time).
 _env_path = Path(__file__).parent / ".env"
@@ -45,13 +46,18 @@ def find_figi(ticker: str, class_code: str = "TQBR") -> list[dict]:
     return results
 
 
-def verify_figi(figi: str) -> dict:
-    """Return instrument details for a given FIGI, or raise if not found."""
-    with Client(os.environ["TBANK_TOKEN"]) as client:
-        response = client.instruments.get_instrument_by(
-            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI,
-            id=figi,
-        )
+def verify_figi(figi: str) -> dict | None:
+    """Return instrument details for a given FIGI, or None if not found."""
+    try:
+        with Client(os.environ["TBANK_TOKEN"]) as client:
+            response = client.instruments.get_instrument_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI,
+                id=figi,
+            )
+    except RequestError as e:
+        if "not found" in str(e).lower():
+            return None
+        raise
     inst = response.instrument
     return {
         "ticker": inst.ticker,
@@ -73,13 +79,16 @@ if __name__ == "__main__":
 
     if args.verify:
         info = verify_figi(args.verify)
-        print(f"FIGI:     {info['figi']}")
-        print(f"Ticker:   {info['ticker']}")
-        print(f"Name:     {info['name']}")
-        print(f"Class:    {info['class_code']}")
-        print(f"Type:     {info['instrument_type']}")
-        print(f"Currency: {info['currency']}")
-        print(f"Exchange: {info['exchange']}")
+        if info is None:
+            print(f"FIGI '{args.verify}' not found in T-Bank API.")
+        else:
+            print(f"FIGI:     {info['figi']}")
+            print(f"Ticker:   {info['ticker']}")
+            print(f"Name:     {info['name']}")
+            print(f"Class:    {info['class_code']}")
+            print(f"Type:     {info['instrument_type']}")
+            print(f"Currency: {info['currency']}")
+            print(f"Exchange: {info['exchange']}")
     elif args.ticker:
         results = find_figi(args.ticker, class_code=None if args.all else "TQBR")
         if not results:
