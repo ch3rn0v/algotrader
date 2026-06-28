@@ -29,3 +29,4 @@ trading_bot/reports/
 
 # Other
 *TODO.md
+*.~lock*
