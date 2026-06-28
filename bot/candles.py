@@ -30,6 +30,7 @@ _INTERVALS = {
     "1min":  CandleInterval.CANDLE_INTERVAL_1_MIN,
     "5min":  CandleInterval.CANDLE_INTERVAL_5_MIN,
     "15min": CandleInterval.CANDLE_INTERVAL_15_MIN,
+    "30min": CandleInterval.CANDLE_INTERVAL_30_MIN,
     "1h":    CandleInterval.CANDLE_INTERVAL_HOUR,
     "1day":  CandleInterval.CANDLE_INTERVAL_DAY,
 }
