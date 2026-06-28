@@ -1,16 +1,16 @@
-"""Look up instrument FIGIs by ticker via the T-Bank Invest API.
+"""Look up instrument FIGIs by ticker, or verify a FIGI, via the T-Bank Invest API.
 
 Usage (from repo root, with venv activated):
     python3 bot/find_figi.py SBERP
-    python3 bot/find_figi.py PLZL
-    python3 bot/find_figi.py IMOEX
+    python3 bot/find_figi.py IMOEX --all
+    python3 bot/find_figi.py --verify BBG0047315Y7
 """
 
 import argparse
 import os
 from pathlib import Path
 
-from tinkoff.invest import Client
+from tinkoff.invest import Client, InstrumentIdType
 
 # Load .env so the script works standalone (same as candles.py does at import time).
 _env_path = Path(__file__).parent / ".env"
@@ -45,17 +45,49 @@ def find_figi(ticker: str, class_code: str = "TQBR") -> list[dict]:
     return results
 
 
+def verify_figi(figi: str) -> dict:
+    """Return instrument details for a given FIGI, or raise if not found."""
+    with Client(os.environ["TBANK_TOKEN"]) as client:
+        response = client.instruments.get_instrument_by(
+            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI,
+            id=figi,
+        )
+    inst = response.instrument
+    return {
+        "ticker": inst.ticker,
+        "figi": inst.figi,
+        "name": inst.name,
+        "class_code": inst.class_code,
+        "instrument_type": inst.instrument_type,
+        "currency": inst.currency,
+        "exchange": inst.exchange,
+    }
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Look up FIGI by ticker via T-Bank API")
-    parser.add_argument("ticker", help="Ticker to search for (e.g. SBERP, PLZL, IMOEX)")
+    parser = argparse.ArgumentParser(description="Look up or verify instrument FIGIs via T-Bank API")
+    parser.add_argument("ticker", nargs="?", help="Ticker to search for (e.g. SBERP, PLZL)")
+    parser.add_argument("--verify", metavar="FIGI", help="Verify a FIGI and show its instrument details")
     parser.add_argument("--all", action="store_true", help="Show all class codes, not just TQBR")
     args = parser.parse_args()
 
-    results = find_figi(args.ticker, class_code=None if args.all else "TQBR")
-    if not results:
-        print(f"No instruments found for '{args.ticker}' (class_code=TQBR). Try --all to see all results.")
+    if args.verify:
+        info = verify_figi(args.verify)
+        print(f"FIGI:     {info['figi']}")
+        print(f"Ticker:   {info['ticker']}")
+        print(f"Name:     {info['name']}")
+        print(f"Class:    {info['class_code']}")
+        print(f"Type:     {info['instrument_type']}")
+        print(f"Currency: {info['currency']}")
+        print(f"Exchange: {info['exchange']}")
+    elif args.ticker:
+        results = find_figi(args.ticker, class_code=None if args.all else "TQBR")
+        if not results:
+            print(f"No instruments found for '{args.ticker}' (class_code=TQBR). Try --all to see all results.")
+        else:
+            print(f"{'TICKER':<12} {'FIGI':<16} {'CLASS':<8} {'TYPE':<12} NAME")
+            print("-" * 72)
+            for r in results:
+                print(f"{r['ticker']:<12} {r['figi']:<16} {r['class_code']:<8} {r['instrument_type']:<12} {r['name']}")
     else:
-        print(f"{'TICKER':<12} {'FIGI':<16} {'CLASS':<8} {'TYPE':<12} NAME")
-        print("-" * 72)
-        for r in results:
-            print(f"{r['ticker']:<12} {r['figi']:<16} {r['class_code']:<8} {r['instrument_type']:<12} {r['name']}")
+        parser.print_help()
