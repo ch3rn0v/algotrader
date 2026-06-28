@@ -8,7 +8,7 @@ Usage:
                      datetime(2024, 1, 1, tzinfo=timezone.utc),
                      datetime(2024, 6, 1, tzinfo=timezone.utc))
 
-Requires TBANK_TOKEN env var.
+Requires TBANK_TOKEN env var (loaded automatically from bot/.env if present).
 """
 import os
 from pathlib import Path
@@ -17,6 +17,14 @@ import pandas as pd
 from tinkoff.invest import Client, CandleInterval
 
 CACHE_DIR = Path(__file__).parent / "cache"
+
+# Load bot/.env once at import time so all scripts get the token automatically
+_env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text().splitlines():
+        if _line.strip() and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 _INTERVALS = {
     "1min":  CandleInterval.CANDLE_INTERVAL_1_MIN,

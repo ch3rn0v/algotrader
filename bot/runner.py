@@ -1,18 +1,9 @@
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from candles import get_candles
+from candles import get_candles  # also loads bot/.env
 from backtest_mean_rev_bb import run_backtest
 from charts import plot_results
-
-# Load .env from trading_bot/
-_env = Path(__file__).parent.parent / "trading_bot" / ".env"
-if _env.exists():
-    for line in _env.read_text().splitlines():
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
 
 FIGI      = "BBG0047315Y7"  # SBERP
 TIMEFRAME = "5min"
@@ -34,5 +25,7 @@ print(f"Total P&L:      {pnl:+,.2f}")
 print(f"Peak exposure:  {peak_exposure:,.2f}")
 print(f"Return:         {pnl/peak_exposure*100:+.2f}%" if peak_exposure > 0 else "Return: n/a")
 
+out_dir = Path(__file__).parent / "outputs" / "backtest"
+out_dir.mkdir(parents=True, exist_ok=True)
 plot_results(candles, equity, trades, peak_exposure, symbol="SBERP", timeframe=TIMEFRAME,
-             path=Path(__file__).parent / "result.png")
+             path=out_dir / "result.png")

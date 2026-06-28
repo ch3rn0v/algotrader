@@ -1,19 +1,17 @@
 """Grid-search optimiser for BB mean reversion parameters.
 
 Usage:
-    source trading_bot/.venv/bin/activate
-
     # defaults: SBERP, 5min, 2025, all CPUs
-    python3 bot2/optimizer.py
+    python3 bot/optimizer.py
 
     # custom dates and instrument
-    python3 bot2/optimizer.py --figi BBG004730N88 --timeframe 15min --from 2024-01-01 --to 2025-01-01
+    python3 bot/optimizer.py --figi BBG004730N88 --timeframe 15min --from 2024-01-01 --to 2025-01-01
 
     # fewer workers, sort by PnL, show top 20
-    python3 bot2/optimizer.py --jobs 4 --sort-by pnl --top 20
+    python3 bot/optimizer.py --jobs 4 --sort-by pnl --top 20
 
     # custom output dir
-    python3 bot2/optimizer.py --out my_results
+    python3 bot/optimizer.py --out outputs/my_results
 
 Or from code:
     from optimizer import optimize
@@ -98,28 +96,24 @@ def _write_html(
     cols = list(df.columns)
     sort_idx = cols.index(default_sort_col) if default_sort_col in cols else -1
 
-    th_css = ("padding:4px 8px;border:1px solid #ccc;background:#f0f0f0;"
-              "white-space:nowrap;cursor:pointer;user-select:none;position:sticky;top:0")
+    th_css = "padding:4px 8px;border:1px solid #ccc;background:#f0f0f0;" "white-space:nowrap;cursor:pointer;user-select:none;position:sticky;top:0"
     td_css = "padding:4px 8px;border:1px solid #ccc;white-space:nowrap"
 
     header_cells = []
     for i, col in enumerate(cols):
         indicator = " ▼" if i == sort_idx else ""
-        dir_attr  = ' data-dir="desc"' if i == sort_idx else ""
-        header_cells.append(
-            f'<th onclick="sortTable(this)" data-col="{col}"{dir_attr} style="{th_css}">'
-            f"{col}{indicator}</th>"
-        )
+        dir_attr = ' data-dir="desc"' if i == sort_idx else ""
+        header_cells.append(f'<th onclick="sortTable(this)" data-col="{col}"{dir_attr} style="{th_css}">' f"{col}{indicator}</th>")
 
     body_rows = []
     for _, row in df.iterrows():
         cells = []
         for col in cols:
-            val    = row[col]
+            val = row[col]
             fmt_fn = _FMT.get(col)
-            txt    = fmt_fn(val) if fmt_fn and pd.notna(val) else ("—" if pd.isna(val) else str(val))
-            bg     = _bg(col, val)
-            style  = f"{td_css};{bg}" if bg else td_css
+            txt = fmt_fn(val) if fmt_fn and pd.notna(val) else ("—" if pd.isna(val) else str(val))
+            bg = _bg(col, val)
+            style = f"{td_css};{bg}" if bg else td_css
             cells.append(f'<td style="{style}">{txt}</td>')
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
@@ -212,7 +206,7 @@ def optimize(
     param_grid: dict,
     fixed_params: Optional[dict] = None,
     n_jobs: Optional[int] = None,
-    out_dir: Path = Path("optimizer_output"),
+    out_dir: Path = Path("outputs/optimizer"),
     label: str = "",
     top_n: int = 30,
 ) -> pd.DataFrame:
@@ -284,15 +278,8 @@ if __name__ == "__main__":
     parser.add_argument("--jobs", type=int, default=None, help="Parallel workers (default: all CPUs)")
     parser.add_argument("--sort-by", default="sortino", help="Result column to sort top-N by (default: sortino)")
     parser.add_argument("--top", type=int, default=20, help="Rows to print (default: 20)")
-    parser.add_argument("--out", default="optimizer_output", metavar="DIR", help="Output directory (default: optimizer_output)")
+    parser.add_argument("--out", default="outputs/optimizer", metavar="DIR", help="Output directory (default: outputs/optimizer)")
     args = parser.parse_args()
-
-    _env = Path(__file__).parent.parent / "trading_bot" / ".env"
-    if _env.exists():
-        for line in _env.read_text().splitlines():
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
 
     from_dt = datetime.strptime(args.date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     to_dt = datetime.strptime(args.date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -315,6 +302,6 @@ if __name__ == "__main__":
             "position_size": 1,
         },
         n_jobs=args.jobs,
-        out_dir=Path(__file__).parent / args.out,
+        out_dir=Path(__file__).parent / args.out,  # e.g. bot/outputs/optimizer
         top_n=args.top,
     )

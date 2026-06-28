@@ -1,3 +1,12 @@
+# Bot
+
+## Setup
+
+`python3 -m venv /path/to/new/virtual/environment`
+`source ./.venv/bin/activate`
+`pip install git+https://github.com/RussianInvestments/invest-python --no-deps`
+
+
 # Trading Bot
 
 A functional-style Python trading bot for the T-Bank (ex-Tinkoff) Invest API,
