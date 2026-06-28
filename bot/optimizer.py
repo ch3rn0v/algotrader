@@ -19,6 +19,7 @@ Or from code:
 """
 
 import argparse
+import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from itertools import product
 from pathlib import Path
 from typing import Optional
 
+import lightgbm as lgbm
 import matplotlib
 
 matplotlib.use("Agg")
@@ -35,13 +37,21 @@ import pandas as pd
 
 from backtest_mean_rev_bb import run_backtest
 from candles import get_candles
+from train_lgbm import (
+    ASSETS as LGBM_ASSETS,
+    MODEL_DIR,
+    PRIMARY_ASSET,
+    PRIMARY_TF,
+    TIMEFRAMES as LGBM_TIMEFRAMES,
+    build_features,
+)
 
 RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "turnover", "total_fees", "peak_exposure"]
 
 
 def _run_one(args: tuple) -> dict:
-    candles, params = args
-    result = run_backtest(candles, **params, headless=True)
+    candles, params, predictions = args
+    result = run_backtest(candles, **params, headless=True, predictions=predictions)
     return {**params, **result}
 
 
@@ -169,6 +179,7 @@ def optimize(
     n_jobs: Optional[int] = None,
     out_dir: Path = Path("outputs/optimizer"),
     label: str = "",
+    predictions: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """
     Cartesian-product grid search, parallelised across CPU cores.
@@ -195,7 +206,7 @@ def optimize(
     print(f"Grid: {n_total} combinations | {n_workers} workers")
 
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        futs = [ex.submit(_run_one, (candles, p)) for p in all_params]
+        futs = [ex.submit(_run_one, (candles, p, predictions)) for p in all_params]
         rows = []
         for i, fut in enumerate(futs, 1):
             rows.append(fut.result())
@@ -241,6 +252,44 @@ if __name__ == "__main__":
     candles = get_candles(args.figi, args.timeframe, from_dt, to_dt)
     print(f"Candles: {len(candles)}")
 
+    # Load model predictions if a model exists for this instrument/timeframe.
+    predictions = None
+    meta_files = sorted(MODEL_DIR.glob("lgbm_*_meta.json"))
+    if meta_files and args.figi == LGBM_ASSETS.get(PRIMARY_ASSET) and args.timeframe == PRIMARY_TF:
+        meta_path = meta_files[-1]
+        model_path = MODEL_DIR / meta_path.name.replace("_meta.json", ".txt")
+        meta = json.loads(meta_path.read_text())
+        feature_cols = meta["feature_cols"]
+
+        lgbm_model = lgbm.Booster(model_file=str(model_path))
+        print(f"Using model: {model_path.name}")
+
+        print("Loading candles for feature engineering...")
+        all_candles = {(PRIMARY_ASSET, PRIMARY_TF): candles}
+        for asset in LGBM_ASSETS:
+            for tf in LGBM_TIMEFRAMES:
+                if not (asset == PRIMARY_ASSET and tf == PRIMARY_TF):
+                    all_candles[(asset, tf)] = get_candles(LGBM_ASSETS[asset], tf, from_dt, to_dt)
+
+        features = build_features(all_candles)
+        null_cols = [c for c in features.columns if features[c].isna().all()]
+        if null_cols:
+            features = features.drop(columns=null_cols)
+
+        missing = [c for c in feature_cols if c not in features.columns]
+        if missing:
+            print(f"WARNING: {len(missing)} feature columns missing — running without predictions.")
+        else:
+            preds_all = lgbm_model.predict(features[feature_cols])
+            pred_map = dict(zip(features["timestamp"].values, preds_all))
+            predictions = np.fromiter(
+                (pred_map.get(ts, 1.0) for ts in candles["timestamp"].values),
+                dtype=float, count=len(candles),
+            )
+            print(f"Predictions: {len(predictions)} bars, mean={predictions.mean():.5f}")
+    else:
+        print("No model found (or non-primary instrument) — running without predictions.")
+
     results = optimize(
         candles,
         label=f"{args.figi}_{args.timeframe}",
@@ -257,4 +306,5 @@ if __name__ == "__main__":
         },
         n_jobs=args.jobs,
         out_dir=Path(__file__).parent / args.out,
+        predictions=predictions,
     )
