@@ -107,12 +107,15 @@ def optimize(
     fixed_params: Optional[dict] = None,
     n_jobs: Optional[int] = None,
     out_dir: Path = Path("optimizer_output"),
+    label: str = "",
+    top_n: int = 30,
 ) -> pd.DataFrame:
     """
     Cartesian-product grid search, parallelised across CPU cores.
 
-    Returns a styled DataFrame (background gradient per result column).
-    Also writes optimizer_output/results.csv and results.html.
+    Returns a plain DataFrame sorted by sortino descending.
+    Also writes results_{label}.csv and results_{label}.png to out_dir.
+    The PNG shows the top_n rows with RdYlGn coloring per result column.
 
     Parameters
     ----------
@@ -120,7 +123,9 @@ def optimize(
     param_grid  : dict of {param_name: [values…]} to sweep
     fixed_params: params passed verbatim to every backtest call
     n_jobs      : worker processes (default: all CPUs)
-    out_dir     : directory for CSV/HTML output
+    out_dir     : directory for output files
+    label       : ticker+timeframe tag used in output filenames
+    top_n       : rows shown in the PNG (default: 30)
     """
     fixed = fixed_params or {}
     keys = list(param_grid.keys())
@@ -146,14 +151,16 @@ def optimize(
     result_cols = [c for c in RESULT_COLS if c in df.columns]
     df = df[param_cols + result_cols]
 
+    df = df.sort_values("sortino", ascending=False).reset_index(drop=True)
+
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_dir / "results.csv", index=False)
+    stem = f"results_{label}" if label else "results"
+    df.to_csv(out_dir / f"{stem}.csv", index=False)
 
-    top_n = min(60, len(df))
-    display_df = df.sort_values("sharpe", ascending=False).head(top_n)
-    _render_table(display_df, result_cols, out_dir / "results.png")
-    print(f"Saved: {out_dir}/results.{{csv,png}}")
+    display_df = df.head(top_n)
+    _render_table(display_df, result_cols, out_dir / f"{stem}.png")
+    print(f"Saved: {out_dir}/{stem}.{{csv,png}}")
 
     return df
 
@@ -165,8 +172,8 @@ if __name__ == "__main__":
     parser.add_argument("--from", dest="date_from", default="2025-01-01", metavar="DATE", help="Start date YYYY-MM-DD (default: 2025-01-01)")
     parser.add_argument("--to", dest="date_to", default="2026-01-01", metavar="DATE", help="End date YYYY-MM-DD (default: 2026-01-01)")
     parser.add_argument("--jobs", type=int, default=None, help="Parallel workers (default: all CPUs)")
-    parser.add_argument("--sort-by", default="sharpe", help="Result column to sort top-N by (default: sharpe)")
-    parser.add_argument("--top", type=int, default=10, help="Rows to print (default: 10)")
+    parser.add_argument("--sort-by", default="sortino", help="Result column to sort top-N by (default: sortino)")
+    parser.add_argument("--top", type=int, default=20, help="Rows to print (default: 20)")
     parser.add_argument("--out", default="optimizer_output", metavar="DIR", help="Output directory (default: optimizer_output)")
     args = parser.parse_args()
 
@@ -185,6 +192,7 @@ if __name__ == "__main__":
 
     results = optimize(
         candles,
+        label=f"{args.figi}_{args.timeframe}",
         param_grid={
             "bb_period": [23, 24, 25, 26, 27],
             "bb_std": [0.5, 1, 1.5, 2.0],
@@ -198,9 +206,10 @@ if __name__ == "__main__":
         },
         n_jobs=args.jobs,
         out_dir=Path(__file__).parent / args.out,
+        top_n=args.top,
     )
 
-    sort_col = args.sort_by if args.sort_by in results.columns else "sharpe"
+    sort_col = args.sort_by if args.sort_by in results.columns else "sortino"
     top = results.sort_values(sort_col, ascending=False).head(args.top)
     print(f"\nTop {args.top} by {sort_col}:")
     print(top.to_string(index=False))
