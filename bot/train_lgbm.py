@@ -25,7 +25,7 @@ from candles import get_candles
 
 ASSETS = {
     "SBERP": "BBG0047315Y7",
-    "IMOEX": "BBG00KDWPPW2",  # Moscow Exchange index
+    "TMOS": "TCSM61901X76",  # T's proxy for Moscow Exchange index
     "PLZL": "BBG000R607Y3",  # Polyus Gold
 }
 PRIMARY_ASSET = "SBERP"
@@ -136,7 +136,26 @@ def main():
     primary = all_candles[(PRIMARY_ASSET, PRIMARY_TF)].sort_values("timestamp").reset_index(drop=True)
     features.loc[:, "target"] = primary["close"].shift(-1).values  # next 5m close
 
+    n_before = len(features)
+
+    # Drop columns that are entirely NaN — these come from an asset/timeframe with no
+    # data in the requested date range (e.g. wrong FIGI). Warn so the user can fix it.
+    all_null_cols = [c for c in features.columns if features[c].isna().all()]
+    if all_null_cols:
+        print(f"WARNING: Dropping {len(all_null_cols)} entirely-null columns (asset has no data):")
+        print(f"  {all_null_cols}")
+        features = features.drop(columns=all_null_cols)
+
     features = features.dropna().reset_index(drop=True)
+    print(f"Rows after dropna: {len(features)} / {n_before} (dropped {n_before - len(features)})")
+
+    if len(features) == 0:
+        partial_null = {c: int(features.isnull().sum()[c]) for c in features.columns}
+        raise RuntimeError(
+            f"Feature matrix is empty after dropna. "
+            f"Per-column null counts: {partial_null}. "
+            f"Check that the primary asset has data in the requested date range."
+        )
 
     # Exclude primary timestamp, per-series source timestamps, and target from features.
     ts_cols = {"timestamp"} | {c for c in features.columns if c.endswith("_ts")}
@@ -148,6 +167,8 @@ def main():
 
     # 4. Temporal train/test split — no shuffling
     split = int(len(features) * TRAIN_RATIO)
+    if split == 0:
+        raise RuntimeError(f"TRAIN_RATIO={TRAIN_RATIO} yields 0 training rows from {len(features)} total. " f"Increase TRAIN_RATIO or extend the date range.")
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
     print(f"\nTrain: {len(X_train)} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
