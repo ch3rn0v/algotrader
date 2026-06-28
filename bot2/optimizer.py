@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -47,14 +48,14 @@ def _run_one(args: tuple) -> dict:
 
 
 _FMT = {
-    "pnl":           lambda v: f"{v:+,.0f}",
-    "sharpe":        lambda v: f"{v:.3f}",
-    "sortino":       lambda v: f"{v:.3f}",
-    "max_dd":        lambda v: f"{v:.3f}",
-    "cagr":          lambda v: f"{v:.3f}",
-    "n_trades":      lambda v: f"{v:.0f}",
+    "pnl": lambda v: f"{v:+,.0f}",
+    "sharpe": lambda v: f"{v:.3f}",
+    "sortino": lambda v: f"{v:.3f}",
+    "max_dd": lambda v: f"{v:.3f}",
+    "cagr": lambda v: f"{v:.3f}",
+    "n_trades": lambda v: f"{v:.0f}",
     "avg_bars_held": lambda v: f"{v:.1f}",
-    "turnover":      lambda v: f"{v:,.0f}",
+    "turnover": lambda v: f"{v:,.0f}",
     "peak_exposure": lambda v: f"{v:,.0f}",
 }
 
@@ -62,10 +63,7 @@ _FMT = {
 def _render_table(df: pd.DataFrame, result_cols: list, path: Path) -> None:
     """Save a color-coded table as a PNG (RdYlGn per result column)."""
     cmap = plt.cm.RdYlGn
-    norms = {
-        col: (df[col].min(), df[col].max())
-        for col in result_cols if col in df.columns
-    }
+    norms = {col: (df[col].min(), df[col].max()) for col in result_cols if col in df.columns}
 
     def _color(col, val):
         if col not in norms or not np.isfinite(val):
@@ -188,14 +186,14 @@ if __name__ == "__main__":
     results = optimize(
         candles,
         param_grid={
-            "bb_period": [10, 15, 20, 25, 30],
-            "bb_std": [1.5, 2.0, 2.5, 3.0],
-            "time_stop_bars": [6, 12, 18, 24],
-            "session_end_utc": [12, 14, 16],
+            "bb_period": [23, 24, 25, 26, 27],
+            "bb_std": [0.5, 1, 1.5, 2.0],
+            "time_stop_bars": [16, 20, 24, 30],
+            "session_end_utc": [14, 15, 16, 17],
+            "width_lookback": [25, 50, 75],
         },
         fixed_params={
             "session_start_utc": 9,
-            "width_lookback": 50,
             "position_size": 1,
         },
         n_jobs=args.jobs,
