@@ -26,6 +26,10 @@ def run_backtest(
     position_size: int = 1,
     initial_cash: float = 100_000.0,
     headless: bool = False,
+    # Estimated market-taker fee per side (applied to each fill's notional).
+    # T-Bank Trader tariff: 0.04% broker + ~0.01% MOEX exchange taker fee = 0.05%.
+    # Source: tbank.ru/invest/tariffs (as of 2025); verify before live use.
+    fee_rate: float = 0.0005,
 ) -> dict:
     df = candles.copy().reset_index(drop=True)
 
@@ -66,21 +70,26 @@ def run_backtest(
         n_entries       = 0
         total_bars_held = 0
         turnover        = 0.0
+        total_fees      = 0.0
         daily_eq_vals   = []
         _prev_date      = None
         _last_eq        = float(initial_cash)
     else:
         equity_rows = []
         trade_rows  = []
+        total_fees  = 0.0
 
     for i in range(len(df)):
         # Execute prior bar's signal at this bar's open
         if i > 0:
             delta = desired - position
             if delta != 0:
-                prev_pos  = position
-                cash     -= delta * opens[i]
-                position += delta
+                prev_pos   = position
+                notional   = abs(delta) * opens[i]
+                fee        = notional * fee_rate
+                cash      -= delta * opens[i] + fee
+                total_fees += fee
+                position  += delta
                 if position != 0:
                     entry_bar = i
                 peak_exposure = max(peak_exposure, abs(position) * opens[i])
@@ -88,9 +97,9 @@ def run_backtest(
                     if prev_pos == 0 and position != 0:
                         n_entries += 1
                     n_trades += 1
-                    turnover += abs(delta) * opens[i]
+                    turnover += notional
                 else:
-                    trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i]})
+                    trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i], "fee": fee})
 
         eq_val = cash + position * closes[i]
 
@@ -165,11 +174,13 @@ def run_backtest(
             "n_trades":      n_trades,
             "avg_bars_held": round(avg_bars_held, 2),
             "turnover":      round(turnover, 2),
+            "total_fees":    round(total_fees, 2),
             "peak_exposure": round(peak_exposure, 2),
         }
     else:
         return {
             "equity":       pd.DataFrame(equity_rows),
-            "trades":       pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame(columns=["timestamp", "qty", "price"]),
+            "trades":       pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame(columns=["timestamp", "qty", "price", "fee"]),
+            "total_fees":   total_fees,
             "peak_exposure": peak_exposure,
         }

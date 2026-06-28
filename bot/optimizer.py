@@ -36,7 +36,7 @@ import pandas as pd
 from backtest_mean_rev_bb import run_backtest
 from candles import get_candles
 
-RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "turnover", "peak_exposure"]
+RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "turnover", "total_fees", "peak_exposure"]
 
 
 def _run_one(args: tuple) -> dict:
@@ -53,7 +53,8 @@ _FMT = {
     "cagr": lambda v: f"{v:.3f}",
     "n_trades": lambda v: f"{v:.0f}",
     "avg_bars_held": lambda v: f"{v:.1f}",
-    "turnover": lambda v: f"{v:,.0f}",
+    "turnover":      lambda v: f"{v:,.0f}",
+    "total_fees":    lambda v: f"{v:,.0f}",
     "peak_exposure": lambda v: f"{v:,.0f}",
 }
 
