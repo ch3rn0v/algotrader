@@ -25,8 +25,8 @@ from candles import get_candles
 
 ASSETS = {
     "SBERP": "BBG0047315Y7",
-    "IMOEX": "BBG333333333",  # Moscow Exchange index — verify FIGI
-    "PLZL": "BBG004731034",  # Polyus Gold — verify FIGI
+    "IMOEX": "BBG00KDWPPW2",  # Moscow Exchange index
+    "PLZL": "BBG000R607Y3",  # Polyus Gold
 }
 PRIMARY_ASSET = "SBERP"
 PRIMARY_TF = "5min"
