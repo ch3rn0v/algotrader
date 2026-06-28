@@ -20,8 +20,8 @@ def plot_results(
     equity = equity.copy()
     equity["timestamp"] = pd.to_datetime(equity["timestamp"])
 
-    eq  = equity["equity"]
-    ts  = equity["timestamp"]
+    eq = equity["equity"]
+    ts = equity["timestamp"]
     pos = equity["position"].to_numpy()
 
     def _annualised(series, downside_only=False):
@@ -30,51 +30,51 @@ def plot_results(
         return (series.mean() / std * np.sqrt(252)) if std > 0 else 0.0
 
     # --- Strategy stats ---
-    pnl    = eq.iloc[-1] - eq.iloc[0]
+    pnl = eq.iloc[-1] - eq.iloc[0]
     n_days = max((ts.iloc[-1] - ts.iloc[0]).days, 1)
 
     if peak_exposure > 0:
         ret_pct = pnl / peak_exposure * 100
-        cagr    = (1 + pnl / peak_exposure) ** (365 / n_days) - 1
-        daily_eq  = equity.set_index("timestamp")["equity"].resample("D").last().ffill().dropna()
+        cagr = (1 + pnl / peak_exposure) ** (365 / n_days) - 1
+        daily_eq = equity.set_index("timestamp")["equity"].resample("D").last().ffill().dropna()
         daily_ret = daily_eq.diff().dropna() / peak_exposure
         running_max = eq.cummax()
-        max_dd      = (eq - running_max).min() / peak_exposure
+        max_dd = (eq - running_max).min() / peak_exposure
     else:
         ret_pct = cagr = max_dd = 0.0
         daily_ret = pd.Series(dtype=float)
 
-    sharpe  = _annualised(daily_ret)
+    sharpe = _annualised(daily_ret)
     sortino = _annualised(daily_ret, downside_only=True)
 
-    gross_profit  = daily_ret[daily_ret > 0].sum()
-    gross_loss    = abs(daily_ret[daily_ret < 0].sum())
+    gross_profit = daily_ret[daily_ret > 0].sum()
+    gross_loss = abs(daily_ret[daily_ret < 0].sum())
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
 
-    entries       = int(np.sum((pos[1:] != 0) & (pos[:-1] == 0)))
-    holding_bars  = int(np.sum(pos != 0))
+    entries = int(np.sum((pos[1:] != 0) & (pos[:-1] == 0)))
+    holding_bars = int(np.sum(pos != 0))
     avg_bars_held = (holding_bars / entries) if entries > 0 else 0.0
 
     total_lots = int(trades["qty"].abs().sum()) if not trades.empty else 0
-    total_rub  = (trades["qty"].abs() * trades["price"]).sum() if not trades.empty else 0.0
+    total_rub = (trades["qty"].abs() * trades["price"]).sum() if not trades.empty else 0.0
 
     # --- Buy & Hold stats (from raw candles) ---
     can = candles.copy()
     can["ts_naive"] = pd.to_datetime(can["timestamp"], utc=True).dt.tz_convert(None)
-    can["date"]     = can["ts_naive"].dt.normalize()
+    can["date"] = can["ts_naive"].dt.normalize()
     price_ts = can["ts_naive"]
-    close    = can["close"]
+    close = can["close"]
 
-    bh_n_days  = max((price_ts.iloc[-1] - price_ts.iloc[0]).days, 1)
+    bh_n_days = max((price_ts.iloc[-1] - price_ts.iloc[0]).days, 1)
     bh_pnl_pct = (close.iloc[-1] / close.iloc[0] - 1) * 100
-    bh_cagr    = (close.iloc[-1] / close.iloc[0]) ** (365 / bh_n_days) - 1
+    bh_cagr = (close.iloc[-1] / close.iloc[0]) ** (365 / bh_n_days) - 1
 
-    daily_close  = can.groupby("date")["close"].last()
+    daily_close = can.groupby("date")["close"].last()
     bh_daily_ret = daily_close.pct_change().dropna()
-    bh_sharpe    = _annualised(bh_daily_ret)
-    bh_sortino   = _annualised(bh_daily_ret, downside_only=True)
-    bh_run_max   = daily_close.cummax()
-    bh_max_dd    = ((daily_close - bh_run_max) / bh_run_max).min()
+    bh_sharpe = _annualised(bh_daily_ret)
+    bh_sortino = _annualised(bh_daily_ret, downside_only=True)
+    bh_run_max = daily_close.cummax()
+    bh_max_dd = ((daily_close - bh_run_max) / bh_run_max).min()
 
     daily_vol = can.groupby("date")["volume"].sum().reset_index()
 
@@ -141,9 +141,9 @@ def plot_results(
     ax3_rub = ax3.twinx()
     if not trades.empty:
         t = trades.copy()
-        t["date"]     = pd.to_datetime(t["timestamp"], utc=True).dt.tz_convert(None).dt.normalize()
+        t["date"] = pd.to_datetime(t["timestamp"], utc=True).dt.tz_convert(None).dt.normalize()
         t["vol_lots"] = t["qty"].abs()
-        t["vol_rub"]  = t["vol_lots"] * t["price"]
+        t["vol_rub"] = t["vol_lots"] * t["price"]
         dv = t.groupby("date")[["vol_lots", "vol_rub"]].sum().reset_index()
         ax3.bar(dv["date"], dv["vol_lots"], width=0.8, color="steelblue", label="lots")
         ax3_rub.bar(dv["date"], dv["vol_rub"], width=0.8, color="tomato", alpha=0.5, label="rubles")

@@ -4,7 +4,7 @@ Strategy:
   - Active only during a configurable intraday session (default 12:00–15:00 MSK = 09:00–12:00 UTC).
   - Enter long when close < lower band; enter short when close > upper band.
   - Only enter when the market is ranging: BB width is below its own rolling median.
-  - Exit at the middle band (mean reversion target) or after `time_stop_bars` (time stop).
+  - Exit at the middle band (mean reversion target), after `time_stop_bars`, or at session end.
   - Flatten at the last bar of each day regardless.
   - Signals execute at the *next* bar's open.
 
@@ -49,6 +49,14 @@ def run_backtest(
     is_last_bar[:-1] = date[:-1] != date[1:]
     is_last_bar[-1] = True
 
+    session_a = in_session.to_numpy()
+
+    # Last in-session bar: session is True now and False on the next bar (or last bar overall).
+    # Setting desired=0 here causes the exit to execute at the following bar's open.
+    is_session_end = np.empty(len(df), dtype=bool)
+    is_session_end[:-1] = session_a[:-1] & ~session_a[1:]
+    is_session_end[-1] = bool(session_a[-1])
+
     closes = df["close"].to_numpy()
     opens = df["open"].to_numpy()
     timestamps = df["timestamp"].to_numpy()
@@ -56,7 +64,6 @@ def run_backtest(
     upper_a = upper.to_numpy()
     lower_a = lower.to_numpy()
     ranging_a = ranging.to_numpy()
-    session_a = in_session.to_numpy()
 
     position = 0
     cash = float(initial_cash)
@@ -122,7 +129,7 @@ def run_backtest(
             equity_rows.append({"timestamp": timestamps[i], "equity": eq_val, "position": position})
 
         # Signal for next bar
-        if np.isnan(mid_a[i]) or is_last_bar[i]:
+        if np.isnan(mid_a[i]) or is_last_bar[i] or is_session_end[i]:
             desired = 0
         elif position != 0:
             bars_held = i - entry_bar
