@@ -1,0 +1,6 @@
+numpy==2.5.0
+pandas==3.0.3
+matplotlib==3.11.0
+
+# T-Bank Invest API — install from source, not PyPI (the PyPI package is an old REST client)
+# pip install git+https://github.com/RussianInvestments/invest-python.git --no-deps
