@@ -208,8 +208,3 @@ if __name__ == "__main__":
         out_dir=Path(__file__).parent / args.out,
         top_n=args.top,
     )
-
-    sort_col = args.sort_by if args.sort_by in results.columns else "sortino"
-    top = results.sort_values(sort_col, ascending=False).head(args.top)
-    print(f"\nTop {args.top} by {sort_col}:")
-    print(top.to_string(index=False))
