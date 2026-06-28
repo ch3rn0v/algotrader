@@ -11,10 +11,12 @@ Usage:
 Requires TBANK_TOKEN env var (loaded automatically from bot/.env if present).
 """
 import os
+import time
 from pathlib import Path
 
 import pandas as pd
 from tinkoff.invest import Client, CandleInterval
+from tinkoff.invest.exceptions import RequestError
 
 CACHE_DIR = Path(__file__).parent / "cache"
 
@@ -35,6 +37,9 @@ _INTERVALS = {
     "1day":  CandleInterval.CANDLE_INTERVAL_DAY,
 }
 
+# Retry delays (seconds) on RESOURCE_EXHAUSTED. Each attempt waits progressively longer.
+_RETRY_DELAYS = [10, 30, 60, 120]
+
 
 def _utc(x) -> pd.Timestamp:
     t = pd.Timestamp(x)
@@ -46,22 +51,35 @@ def _q(q) -> float:
 
 
 def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp) -> pd.DataFrame:
-    with Client(os.environ["TBANK_TOKEN"]) as client:
-        raw = list(client.get_all_candles(
-            instrument_id=figi,
-            from_=from_ts.to_pydatetime(),
-            to=to_ts.to_pydatetime(),
-            interval=_INTERVALS[timeframe],
-        ))
-    rows = [{
-        "timestamp": _utc(c.time),
-        "open":  _q(c.open),
-        "high":  _q(c.high),
-        "low":   _q(c.low),
-        "close": _q(c.close),
-        "volume": c.volume,
-    } for c in raw]
-    return pd.DataFrame(rows)
+    last_exc = None
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        if attempt > 0:
+            delay = _RETRY_DELAYS[attempt - 1]
+            print(f"  Rate limited — retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})...")
+            time.sleep(delay)
+        try:
+            with Client(os.environ["TBANK_TOKEN"]) as client:
+                raw = list(client.get_all_candles(
+                    instrument_id=figi,
+                    from_=from_ts.to_pydatetime(),
+                    to=to_ts.to_pydatetime(),
+                    interval=_INTERVALS[timeframe],
+                ))
+            rows = [{
+                "timestamp": _utc(c.time),
+                "open":  _q(c.open),
+                "high":  _q(c.high),
+                "low":   _q(c.low),
+                "close": _q(c.close),
+                "volume": c.volume,
+            } for c in raw]
+            return pd.DataFrame(rows)
+        except RequestError as e:
+            if "RESOURCE_EXHAUSTED" in str(e):
+                last_exc = e
+                continue
+            raise
+    raise last_exc
 
 
 def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
