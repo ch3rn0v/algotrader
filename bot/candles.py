@@ -37,8 +37,11 @@ _INTERVALS = {
     "1day":  CandleInterval.CANDLE_INTERVAL_DAY,
 }
 
-# Retry delays (seconds) on RESOURCE_EXHAUSTED. Each attempt waits progressively longer.
-_RETRY_DELAYS = [10, 30, 60, 120]
+# Retry delays (seconds) for transient errors, keyed by gRPC status string.
+_RETRY_DELAYS = {
+    "RESOURCE_EXHAUSTED": [10, 30, 60, 120],
+    "UNAVAILABLE":        [2, 5, 15, 30],
+}
 
 
 def _utc(x) -> pd.Timestamp:
@@ -51,12 +54,8 @@ def _q(q) -> float:
 
 
 def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp) -> pd.DataFrame:
-    last_exc = None
-    for attempt in range(len(_RETRY_DELAYS) + 1):
-        if attempt > 0:
-            delay = _RETRY_DELAYS[attempt - 1]
-            print(f"  Rate limited — retrying in {delay}s (attempt {attempt}/{len(_RETRY_DELAYS)})...")
-            time.sleep(delay)
+    retry_counts = {status: 0 for status in _RETRY_DELAYS}
+    while True:
         try:
             with Client(os.environ["TBANK_TOKEN"]) as client:
                 raw = list(client.get_all_candles(
@@ -65,21 +64,31 @@ def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp
                     to=to_ts.to_pydatetime(),
                     interval=_INTERVALS[timeframe],
                 ))
-            rows = [{
+            return pd.DataFrame([{
                 "timestamp": _utc(c.time),
                 "open":  _q(c.open),
                 "high":  _q(c.high),
                 "low":   _q(c.low),
                 "close": _q(c.close),
                 "volume": c.volume,
-            } for c in raw]
-            return pd.DataFrame(rows)
+            } for c in raw])
         except RequestError as e:
-            if "RESOURCE_EXHAUSTED" in str(e):
-                last_exc = e
-                continue
-            raise
-    raise last_exc
+            err = str(e)
+            for status, delays in _RETRY_DELAYS.items():
+                if status in err:
+                    n = retry_counts[status]
+                    if n < len(delays):
+                        retry_counts[status] += 1
+                        print(f"  {status} — retrying in {delays[n]}s (attempt {n + 1}/{len(delays)})...")
+                        time.sleep(delays[n])
+                        break
+                    raise RuntimeError(
+                        f"{status} fetching {figi} {timeframe}: gave up after {len(delays)} retries"
+                    ) from e
+            else:
+                raise RuntimeError(
+                    f"Unexpected API error fetching {figi} {timeframe}: {err}"
+                ) from e
 
 
 def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
