@@ -295,10 +295,12 @@ if __name__ == "__main__":
         label=f"{args.figi}_{args.timeframe}",
         param_grid={
             "bb_period": [20, 23, 24, 25, 26, 27],
-            "bb_std": [0.5, 1, 1.5, 2.0],
-            "time_stop_bars": [12, 16, 20, 24, 30],
+            "bb_std": [1.5, 2.0, 2.5],
+            "time_stop_bars": [16, 20, 24, 30],
             "session_end_utc": [12, 14, 15, 16, 17],
-            "width_lookback": [40, 50, 60],
+            "width_lookback": [50],
+            "pred_long_threshold": [1.0, 1.01, 1.1],
+            "pred_short_threshold": [1.0, 0.99, 0.9],
         },
         fixed_params={
             "session_start_utc": 9,

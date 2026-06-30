@@ -33,9 +33,11 @@ def run_backtest(
     fee_rate: float = 0.0005,
     # Optional array of model predictions aligned with candles.
     # predictions[i] is the predicted close[i]/close[i-1] for bar i.
-    # When provided, only enter long if pred > 1.0 and only enter short if pred < 1.0.
+    # When provided, only enter long if pred > pred_long_threshold and only enter short if pred < pred_short_threshold.
     # When None, the plain BB signal is used with no model filter.
     predictions: np.ndarray | None = None,
+    pred_long_threshold: float = 1.0,
+    pred_short_threshold: float = 1.0,
 ) -> dict:
     df = candles.copy().reset_index(drop=True)
 
@@ -108,8 +110,8 @@ def run_backtest(
             elif session_a[p] and ranging_a[p]:
                 if predictions is not None:
                     pred = float(predictions[i])
-                    want_long = closes[p] < lower_a[p] and pred > 1.0
-                    want_short = closes[p] > upper_a[p] and pred < 1.0
+                    want_long = closes[p] < lower_a[p] and pred > pred_long_threshold
+                    want_short = closes[p] > upper_a[p] and pred < pred_short_threshold
                 else:
                     want_long = closes[p] < lower_a[p]
                     want_short = closes[p] > upper_a[p]
