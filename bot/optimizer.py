@@ -63,8 +63,8 @@ _FMT = {
     "cagr": lambda v: f"{v:.3f}",
     "n_trades": lambda v: f"{v:.0f}",
     "avg_bars_held": lambda v: f"{v:.1f}",
-    "turnover":      lambda v: f"{v:,.0f}",
-    "total_fees":    lambda v: f"{v:,.0f}",
+    "turnover": lambda v: f"{v:,.0f}",
+    "total_fees": lambda v: f"{v:,.0f}",
     "peak_exposure": lambda v: f"{v:,.0f}",
 }
 
@@ -169,7 +169,6 @@ th:hover {{ filter: brightness(0.92); }}
 </html>"""
 
     path.write_text(html, encoding="utf-8")
-
 
 
 def optimize(
@@ -284,7 +283,8 @@ if __name__ == "__main__":
             pred_map = dict(zip(features["timestamp"].values, preds_all))
             predictions = np.fromiter(
                 (pred_map.get(ts, 1.0) for ts in candles["timestamp"].values),
-                dtype=float, count=len(candles),
+                dtype=float,
+                count=len(candles),
             )
             print(f"Predictions: {len(predictions)} bars, mean={predictions.mean():.5f}")
     else:
@@ -294,10 +294,10 @@ if __name__ == "__main__":
         candles,
         label=f"{args.figi}_{args.timeframe}",
         param_grid={
-            "bb_period": [23, 24, 25, 26, 27],
+            "bb_period": [20, 23, 24, 25, 26, 27],
             "bb_std": [0.5, 1, 1.5, 2.0],
-            "time_stop_bars": [16, 20, 24, 30],
-            "session_end_utc": [14, 15, 16, 17],
+            "time_stop_bars": [12, 16, 20, 24, 30],
+            "session_end_utc": [12, 14, 15, 16, 17],
             "width_lookback": [40, 50, 60],
         },
         fixed_params={
