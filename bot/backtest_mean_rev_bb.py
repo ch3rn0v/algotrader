@@ -19,11 +19,11 @@ import pandas as pd
 def run_backtest(
     candles: pd.DataFrame,
     bb_alpha: float = 0.1,
-    bb_std: float = 2.0,
-    time_stop_bars: int = 12,
-    width_alpha: float = 0.1,
+    bb_std: float = 1.5,
+    time_stop_bars: int = 16,
+    width_alpha: float = 0.2,
     session_start_utc: int = 9,
-    session_end_utc: int = 12,
+    session_end_utc: int = 16,
     position_size: int = 1,
     initial_cash: float = 100_000.0,
     headless: bool = False,
@@ -36,8 +36,8 @@ def run_backtest(
     # When provided, only enter long if pred > pred_long_threshold and only enter short if pred < pred_short_threshold.
     # When None, the plain BB signal is used with no model filter.
     predictions: np.ndarray | None = None,
-    pred_long_threshold: float = 1.0,
-    pred_short_threshold: float = 1.0,
+    pred_long_threshold: float = 1.002,
+    pred_short_threshold: float = 0.998,
 ) -> dict:
     df = candles.copy().reset_index(drop=True)
 
