@@ -218,12 +218,14 @@ if __name__ == "__main__":
     parser.add_argument("--timeframe", default="5min", help="Candle timeframe (default: 5min)")
     parser.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="Display start YYYY-MM-DD (default: yesterday)")
     parser.add_argument("--to", dest="date_to", default=None, metavar="DATE", help="Display end YYYY-MM-DD (default: date_from + 1 day)")
-    parser.add_argument("--bb-alpha", type=float, default=0.1)
-    parser.add_argument("--bb-std", type=float, default=2.0)
-    parser.add_argument("--time-stop", type=int, default=12)
-    parser.add_argument("--width-alpha", type=float, default=0.1)
-    parser.add_argument("--session-start", type=int, default=9)
-    parser.add_argument("--session-end", type=int, default=12)
+    parser.add_argument("--bb-alpha",            type=float, default=0.1)
+    parser.add_argument("--bb-std",               type=float, default=2.0)
+    parser.add_argument("--time-stop-bars",        type=int,   default=12)
+    parser.add_argument("--width-alpha",           type=float, default=0.1)
+    parser.add_argument("--session-start-utc",     type=int,   default=9)
+    parser.add_argument("--session-end-utc",       type=int,   default=12)
+    parser.add_argument("--pred-long-threshold",   type=float, default=1.0)
+    parser.add_argument("--pred-short-threshold",  type=float, default=1.0)
     parser.add_argument("--out", default="outputs/diagnostics", metavar="DIR")
     args = parser.parse_args()
 
@@ -252,10 +254,12 @@ if __name__ == "__main__":
         candles,
         bb_alpha=args.bb_alpha,
         bb_std=args.bb_std,
-        time_stop_bars=args.time_stop,
+        time_stop_bars=args.time_stop_bars,
         width_alpha=args.width_alpha,
-        session_start_utc=args.session_start,
-        session_end_utc=args.session_end,
+        session_start_utc=args.session_start_utc,
+        session_end_utc=args.session_end_utc,
+        pred_long_threshold=args.pred_long_threshold,
+        pred_short_threshold=args.pred_short_threshold,
         position_size=1,
         headless=False,
         predictions=predictions,
