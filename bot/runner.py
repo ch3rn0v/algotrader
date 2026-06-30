@@ -1,46 +1,55 @@
 """Model-guided backtest runner.
 
 Workflow:
-  1. Load the latest LightGBM model and its metadata.
-  2. Load candles for all assets/timeframes used during training.
-  3. Build features and generate a prediction for every primary 5m bar.
-  4. Isolate the test period (bars after the training cutoff).
-  5. Run the Bollinger Band backtest with model predictions as a directional
-     filter on new entries: only enter long if pred > 1.0, short if pred < 1.0.
-  6. Report results and save chart.
+  1. Load best params from the latest optimizer results CSV.
+  2. Load the latest LightGBM model (no retraining).
+  3. Load candles, build features, generate predictions.
+  4. Isolate the test period (bars after train cutoff) and run the backtest.
+  5. Report results and save chart.
+
+Usage:
+    python3 bot/runner.py
 """
 
 import json
 from pathlib import Path
 
 import lightgbm as lgbm
-import numpy as np
 import pandas as pd
 
 from backtest_mean_rev_bb import run_backtest
 from candles import get_candles
 from charts import plot_results
+from optimizer import RESULT_COLS
 from train_lgbm import ASSETS, FROM, MODEL_DIR, PRIMARY_ASSET, PRIMARY_TF, TIMEFRAMES, TO, build_features
 
-# ---------------------------------------------------------------------------
-# Backtest parameters
-# ---------------------------------------------------------------------------
-
-BB_PERIOD = 20
-BB_STD = 2.0
-TIME_STOP_BARS = 12
-SESSION_START_UTC = 9
-SESSION_END_UTC = 12
-
+OPTIMIZER_OUT = Path(__file__).parent / "outputs" / "optimizer"
 OUT_DIR = Path(__file__).parent / "outputs" / "backtest"
 
 # ---------------------------------------------------------------------------
-# 1. Load model
+# 1. Load best params from latest optimizer run
+# ---------------------------------------------------------------------------
+
+figi = ASSETS[PRIMARY_ASSET]
+csv_path = OPTIMIZER_OUT / f"results_{figi}_{PRIMARY_TF}.csv"
+if not csv_path.exists():
+    raise FileNotFoundError(f"No optimizer results at {csv_path}. Run optimizer.py first.")
+
+opt_df = pd.read_csv(csv_path)  # already sorted by sortino descending
+best = opt_df.iloc[0]
+bt_params = {k: best[k] for k in opt_df.columns if k not in RESULT_COLS}
+
+print(f"Best params (sortino={best['sortino']:.4f}):")
+for k, v in bt_params.items():
+    print(f"  {k}: {v}")
+
+# ---------------------------------------------------------------------------
+# 2. Load model
 # ---------------------------------------------------------------------------
 
 meta_files = sorted(MODEL_DIR.glob("lgbm_*_meta.json"))
 if not meta_files:
-    raise FileNotFoundError(f"No model metadata found in {MODEL_DIR}. Run train_lgbm.py first.")
+    raise FileNotFoundError(f"No model found in {MODEL_DIR}. Run train_lgbm.py first.")
 
 meta_path = meta_files[-1]
 model_path = MODEL_DIR / meta_path.name.replace("_meta.json", ".txt")
@@ -49,11 +58,11 @@ feature_cols = meta["feature_cols"]
 train_end_ts = pd.Timestamp(meta["train_end_ts"])
 
 model = lgbm.Booster(model_file=str(model_path))
-print(f"Model:         {model_path.name}")
-print(f"Train cutoff:  {train_end_ts}")
+print(f"\nModel:        {model_path.name}")
+print(f"Train cutoff: {train_end_ts}")
 
 # ---------------------------------------------------------------------------
-# 2. Load candles for all assets and timeframes
+# 3. Load candles
 # ---------------------------------------------------------------------------
 
 print("\nLoading candles...")
@@ -65,7 +74,7 @@ for asset in ASSETS:
         print(f"  {asset} {tf}: {len(df)} bars")
 
 # ---------------------------------------------------------------------------
-# 3. Build features and generate predictions
+# 4. Build features and predict
 # ---------------------------------------------------------------------------
 
 print("\nBuilding features...")
@@ -73,60 +82,36 @@ features = build_features(all_candles)
 
 null_cols = [c for c in features.columns if features[c].isna().all()]
 if null_cols:
-    print(f"  Dropping {len(null_cols)} entirely-null columns: {null_cols}")
     features = features.drop(columns=null_cols)
 
 missing_cols = [c for c in feature_cols if c not in features.columns]
 if missing_cols:
-    raise RuntimeError(
-        f"Feature columns from training are missing in current data: {missing_cols}. "
-        f"Ensure all training assets have data in the date range."
-    )
+    raise RuntimeError(f"Feature columns missing from current data: {missing_cols}")
 
-# features rows are aligned 1-to-1 with primary candles (build_features uses a left join).
 primary = all_candles[(PRIMARY_ASSET, PRIMARY_TF)].sort_values("timestamp").reset_index(drop=True)
-assert len(features) == len(primary), "Feature matrix row count does not match primary candles."
-
-# LightGBM handles NaN in input (warmup rows) via its missing-value branches.
 predictions = model.predict(features[feature_cols])
-print(f"Predictions:   {len(predictions)} bars, mean={predictions.mean():.5f}")
+print(f"Predictions:  {len(predictions)} bars, mean={predictions.mean():.5f}")
 
 # ---------------------------------------------------------------------------
-# 4. Isolate test period
+# 5. Run backtest on test period
 # ---------------------------------------------------------------------------
 
-test_mask = primary["timestamp"] > train_end_ts
-test_candles = primary[test_mask].reset_index(drop=True)
-test_predictions = predictions[test_mask.to_numpy()]
+bt_mask = primary["timestamp"] > train_end_ts
+bt_candles = primary[bt_mask].reset_index(drop=True)
+bt_predictions = predictions[bt_mask.to_numpy()]
 
-if len(test_candles) == 0:
-    raise RuntimeError("Test period is empty. Check train_end_ts in the model metadata.")
+if len(bt_candles) == 0:
+    raise RuntimeError("Test period is empty. Check train_end_ts in model metadata.")
 
-print(f"\nTest period:   {len(test_candles)} bars")
-print(f"  from: {test_candles['timestamp'].iloc[0]}")
-print(f"  to:   {test_candles['timestamp'].iloc[-1]}")
+print(f"\nTest period: {len(bt_candles)} bars")
+print(f"  from: {bt_candles['timestamp'].iloc[0]}")
+print(f"  to:   {bt_candles['timestamp'].iloc[-1]}")
 
-# ---------------------------------------------------------------------------
-# 5. Run backtest
-# ---------------------------------------------------------------------------
+result = run_backtest(bt_candles, predictions=bt_predictions, **bt_params)
 
-results = run_backtest(
-    test_candles,
-    bb_period=BB_PERIOD,
-    bb_std=BB_STD,
-    time_stop_bars=TIME_STOP_BARS,
-    session_start_utc=SESSION_START_UTC,
-    session_end_utc=SESSION_END_UTC,
-    predictions=test_predictions,
-)
-
-# ---------------------------------------------------------------------------
-# 6. Report
-# ---------------------------------------------------------------------------
-
-equity = results["equity"]
-trades = results["trades"]
-peak_exposure = results["peak_exposure"]
+equity = result["equity"]
+trades = result["trades"]
+peak_exposure = result["peak_exposure"]
 
 pnl = equity["equity"].iloc[-1] - equity["equity"].iloc[0]
 print(f"\nTrades:        {len(trades)}")
@@ -135,9 +120,13 @@ print(f"Peak exposure: {peak_exposure:,.2f}")
 if peak_exposure > 0:
     print(f"Return:        {pnl / peak_exposure * 100:+.2f}%")
 
+# ---------------------------------------------------------------------------
+# 6. Save chart
+# ---------------------------------------------------------------------------
+
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 plot_results(
-    test_candles, equity, trades, peak_exposure,
-    symbol="SBERP (test)", timeframe="5min",
+    bt_candles, equity, trades, peak_exposure,
+    symbol=f"{PRIMARY_ASSET} (test)", timeframe=PRIMARY_TF,
     path=OUT_DIR / "result.png",
 )

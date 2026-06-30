@@ -287,6 +287,12 @@ if __name__ == "__main__":
                 count=len(candles),
             )
             print(f"Predictions: {len(predictions)} bars, mean={predictions.mean():.5f}")
+
+            train_end_ts = pd.Timestamp(meta["train_end_ts"])
+            test_mask = candles["timestamp"] > train_end_ts
+            print(f"Using test period: {test_mask.sum()} / {len(candles)} bars (after {train_end_ts})")
+            candles = candles.loc[test_mask].reset_index(drop=True)
+            predictions = predictions[test_mask.values]
     else:
         print("No model found (or non-primary instrument) — running without predictions.")
 
