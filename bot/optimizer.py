@@ -294,11 +294,11 @@ if __name__ == "__main__":
         candles,
         label=f"{args.figi}_{args.timeframe}",
         param_grid={
-            "bb_period": [20, 23, 24, 25, 26, 27],
+            "bb_alpha": [0.05, 0.1, 0.15, 0.2],
             "bb_std": [1.5, 2.0, 2.5],
             "time_stop_bars": [16, 20, 24, 30],
             "session_end_utc": [12, 14, 15, 16, 17],
-            "width_lookback": [50],
+            "width_alpha": [0.05, 0.1, 0.2],
             "pred_long_threshold": [1.0, 1.0005, 1.001, 1.002],
             "pred_short_threshold": [1.0, 0.9995, 0.999, 0.998],
         },

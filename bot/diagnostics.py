@@ -94,16 +94,16 @@ def plot_diagnostics(
     equity: pd.DataFrame,
     trades: pd.DataFrame,
     predictions: np.ndarray | None,
-    bb_period: int,
+    bb_alpha: float,
     bb_std: float,
-    width_lookback: int,
+    width_alpha: float,
     display_from: datetime,
     display_to: datetime,
     path: Path = Path("diagnostics.png"),
 ) -> None:
     # Compute BB on full candle set (warmup included), then slice to display window.
-    mid = candles["close"].rolling(bb_period).mean()
-    std_bb = candles["close"].rolling(bb_period).std()
+    mid = candles["close"].ewm(alpha=bb_alpha).mean()
+    std_bb = candles["close"].ewm(alpha=bb_alpha).std()
     upper = mid + bb_std * std_bb
     lower = mid - bb_std * std_bb
 
@@ -159,7 +159,7 @@ def plot_diagnostics(
         ax_price.axvline(row["timestamp"], color=color, alpha=0.8, lw=1.2, zorder=5)
 
     ax_price.set_ylabel("Price (RUB)")
-    ax_price.set_title(f"Price + Bollinger Bands  (period={bb_period}, std={bb_std})", loc="left")
+    ax_price.set_title(f"Price + Bollinger Bands  (alpha={bb_alpha}, std={bb_std})", loc="left")
     ax_price.legend(loc="upper left", fontsize=8)
     ax_price.margins(0)
     ax_price.grid(True, lw=0.4)
@@ -218,10 +218,10 @@ if __name__ == "__main__":
     parser.add_argument("--timeframe", default="5min", help="Candle timeframe (default: 5min)")
     parser.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="Display start YYYY-MM-DD (default: yesterday)")
     parser.add_argument("--to", dest="date_to", default=None, metavar="DATE", help="Display end YYYY-MM-DD (default: date_from + 1 day)")
-    parser.add_argument("--bb-period", type=int, default=20)
+    parser.add_argument("--bb-alpha", type=float, default=0.1)
     parser.add_argument("--bb-std", type=float, default=2.0)
     parser.add_argument("--time-stop", type=int, default=12)
-    parser.add_argument("--width-lookback", type=int, default=50)
+    parser.add_argument("--width-alpha", type=float, default=0.1)
     parser.add_argument("--session-start", type=int, default=9)
     parser.add_argument("--session-end", type=int, default=12)
     parser.add_argument("--out", default="outputs/diagnostics", metavar="DIR")
@@ -250,10 +250,10 @@ if __name__ == "__main__":
 
     result = run_backtest(
         candles,
-        bb_period=args.bb_period,
+        bb_alpha=args.bb_alpha,
         bb_std=args.bb_std,
         time_stop_bars=args.time_stop,
-        width_lookback=args.width_lookback,
+        width_alpha=args.width_alpha,
         session_start_utc=args.session_start,
         session_end_utc=args.session_end,
         position_size=1,
@@ -271,9 +271,9 @@ if __name__ == "__main__":
         equity=result["equity"],
         trades=result["trades"],
         predictions=predictions,
-        bb_period=args.bb_period,
+        bb_alpha=args.bb_alpha,
         bb_std=args.bb_std,
-        width_lookback=args.width_lookback,
+        width_alpha=args.width_alpha,
         display_from=display_from,
         display_to=display_to,
         path=out_path,
