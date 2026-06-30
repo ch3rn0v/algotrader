@@ -299,8 +299,8 @@ if __name__ == "__main__":
             "time_stop_bars": [16, 20, 24, 30],
             "session_end_utc": [12, 14, 15, 16, 17],
             "width_lookback": [50],
-            "pred_long_threshold": [1.0, 1.01, 1.1],
-            "pred_short_threshold": [1.0, 0.99, 0.9],
+            "pred_long_threshold": [1.0, 1.0005, 1.001, 1.002],
+            "pred_short_threshold": [1.0, 0.9995, 0.999, 0.998],
         },
         fixed_params={
             "session_start_utc": 9,
