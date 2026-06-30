@@ -8,10 +8,14 @@ Workflow:
   5. Report results and save chart.
 
 Usage:
-    python3 bot/runner.py
+    python3 bot/runner.py                          # best params from optimizer
+    python3 bot/runner.py --bb-alpha 0.05          # override specific params
+    python3 bot/runner.py --bb-std 2.0 --session-end-utc 14
 """
 
+import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import lightgbm as lgbm
@@ -27,6 +31,22 @@ OPTIMIZER_OUT = Path(__file__).parent / "outputs" / "optimizer"
 OUT_DIR = Path(__file__).parent / "outputs" / "backtest"
 
 # ---------------------------------------------------------------------------
+# Args — all optional; any provided value overrides the optimizer's best
+# ---------------------------------------------------------------------------
+
+parser = argparse.ArgumentParser(description="Run backtest with best optimizer params")
+parser.add_argument("--bb-alpha",             type=float)
+parser.add_argument("--bb-std",               type=float)
+parser.add_argument("--time-stop-bars",        type=int)
+parser.add_argument("--width-alpha",           type=float)
+parser.add_argument("--session-start-utc",     type=int)
+parser.add_argument("--session-end-utc",       type=int)
+parser.add_argument("--position-size",         type=int)
+parser.add_argument("--pred-long-threshold",   type=float)
+parser.add_argument("--pred-short-threshold",  type=float)
+args = parser.parse_args()
+
+# ---------------------------------------------------------------------------
 # 1. Load best params from latest optimizer run
 # ---------------------------------------------------------------------------
 
@@ -39,9 +59,14 @@ opt_df = pd.read_csv(csv_path)  # already sorted by sortino descending
 best = opt_df.iloc[0]
 bt_params = {k: best[k] for k in opt_df.columns if k not in RESULT_COLS}
 
-print(f"Best params (sortino={best['sortino']:.4f}):")
+overrides = {k: v for k, v in vars(args).items() if v is not None}
+bt_params.update(overrides)
+
+source = "optimizer" if not overrides else f"optimizer + CLI overrides: {list(overrides.keys())}"
+print(f"Params ({source}, sortino={best['sortino']:.4f}):")
 for k, v in bt_params.items():
-    print(f"  {k}: {v}")
+    marker = " *" if k in overrides else ""
+    print(f"  {k}: {v}{marker}")
 
 # ---------------------------------------------------------------------------
 # 2. Load model
@@ -124,9 +149,10 @@ if peak_exposure > 0:
 # 6. Save chart
 # ---------------------------------------------------------------------------
 
+ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 plot_results(
     bt_candles, equity, trades, peak_exposure,
     symbol=f"{PRIMARY_ASSET} (test)", timeframe=PRIMARY_TF,
-    path=OUT_DIR / "result.png",
+    path=OUT_DIR / f"result_{ts}.png",
 )
