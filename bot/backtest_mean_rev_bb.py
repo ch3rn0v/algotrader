@@ -18,10 +18,10 @@ import pandas as pd
 
 def run_backtest(
     candles: pd.DataFrame,
-    bb_period: int = 20,
+    bb_alpha: float = 0.1,
     bb_std: float = 2.0,
     time_stop_bars: int = 12,
-    width_lookback: int = 50,
+    width_alpha: float = 0.1,
     session_start_utc: int = 9,
     session_end_utc: int = 12,
     position_size: int = 1,
@@ -41,13 +41,13 @@ def run_backtest(
 ) -> dict:
     df = candles.copy().reset_index(drop=True)
 
-    mid = df["close"].rolling(bb_period).mean()
-    std = df["close"].rolling(bb_period).std()
+    mid = df["close"].ewm(alpha=bb_alpha).mean()
+    std = df["close"].ewm(alpha=bb_alpha).std()
     upper = mid + bb_std * std
     lower = mid - bb_std * std
     width = (upper - lower) / mid
 
-    ranging = width < width.rolling(width_lookback).median()
+    trending = width > width.ewm(alpha=width_alpha).mean()
     ts_dt = pd.to_datetime(df["timestamp"])
     in_session = (ts_dt.dt.hour >= session_start_utc) & (ts_dt.dt.hour < session_end_utc)
 
@@ -69,7 +69,7 @@ def run_backtest(
     mid_a = mid.to_numpy()
     upper_a = upper.to_numpy()
     lower_a = lower.to_numpy()
-    ranging_a = ranging.to_numpy()
+    trending_a = trending.to_numpy()
 
     position = 0
     cash = float(initial_cash)
@@ -101,13 +101,12 @@ def run_backtest(
                 desired = 0
             elif position != 0:
                 bars_held = i - entry_bar
-                hit_midband = (position > 0 and closes[p] >= mid_a[p]) or \
-                              (position < 0 and closes[p] <= mid_a[p])
+                hit_midband = (position > 0 and closes[p] >= mid_a[p]) or (position < 0 and closes[p] <= mid_a[p])
                 if hit_midband or bars_held >= time_stop_bars:
                     desired = 0
                 else:
                     desired = position
-            elif session_a[p] and ranging_a[p]:
+            elif session_a[p] and trending_a[p]:
                 if predictions is not None:
                     pred = float(predictions[i])
                     want_long = closes[p] < lower_a[p] and pred > pred_long_threshold
