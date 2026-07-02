@@ -8,18 +8,11 @@ Usage (from repo root, with venv activated):
 
 import argparse
 import os
-from pathlib import Path
 
 from tinkoff.invest import Client, InstrumentIdType
 from tinkoff.invest.exceptions import RequestError
 
-# Load .env so the script works standalone (same as candles.py does at import time).
-_env_path = Path(__file__).parent / ".env"
-if _env_path.exists():
-    for _line in _env_path.read_text().splitlines():
-        if _line.strip() and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
+import config  # noqa: F401 — loads bot/.env into os.environ
 
 
 def find_figi(ticker: str, class_code: str = "TQBR") -> list[dict]:

@@ -11,11 +11,9 @@ Usage:
 """
 
 import argparse
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import lightgbm as lgbm
 import matplotlib
 
 matplotlib.use("Agg")
@@ -25,68 +23,11 @@ import pandas as pd
 
 from backtest_mean_rev_bb import run_backtest
 from candles import get_candles
-from train_lgbm import (
-    ASSETS as LGBM_ASSETS,
-    MODEL_DIR,
-    PRIMARY_ASSET,
-    PRIMARY_TF,
-    TIMEFRAMES as LGBM_TIMEFRAMES,
-    build_features,
-)
+from config import BOT_DIR
+from model import build_predictions
 
 # Extra history loaded before the display window for BB/width warmup.
 _WARMUP_DAYS = 5
-
-
-def _build_predictions(
-    candles: pd.DataFrame,
-    figi: str,
-    timeframe: str,
-    load_from: datetime,
-    load_to: datetime,
-) -> np.ndarray | None:
-    """Return predictions array aligned with `candles`, or None if unavailable."""
-    meta_files = sorted(MODEL_DIR.glob("lgbm_*_meta.json"))
-    if not meta_files:
-        print("No model found.")
-        return None
-    if figi != LGBM_ASSETS.get(PRIMARY_ASSET) or timeframe != PRIMARY_TF:
-        print("No model for this instrument/timeframe.")
-        return None
-
-    meta_path = meta_files[-1]
-    model_path = MODEL_DIR / meta_path.name.replace("_meta.json", ".txt")
-    meta = json.loads(meta_path.read_text())
-    feature_cols = meta["feature_cols"]
-
-    model = lgbm.Booster(model_file=str(model_path))
-    print(f"Using model: {model_path.name}")
-
-    all_candles = {(PRIMARY_ASSET, PRIMARY_TF): candles}
-    for asset in LGBM_ASSETS:
-        for tf in LGBM_TIMEFRAMES:
-            if not (asset == PRIMARY_ASSET and tf == PRIMARY_TF):
-                all_candles[(asset, tf)] = get_candles(LGBM_ASSETS[asset], tf, load_from, load_to)
-
-    features = build_features(all_candles)
-    null_cols = [c for c in features.columns if features[c].isna().all()]
-    if null_cols:
-        features = features.drop(columns=null_cols)
-
-    missing = [c for c in feature_cols if c not in features.columns]
-    if missing:
-        print(f"WARNING: {len(missing)} feature columns missing — no predictions.")
-        return None
-
-    preds = model.predict(features[feature_cols])
-    pred_map = dict(zip(features["timestamp"].values, preds))
-    # np.nan for warmup bars that have no features; backtest treats nan same as
-    # neutral (nan > threshold → False, so no entry on either side).
-    return np.fromiter(
-        (pred_map.get(ts, np.nan) for ts in candles["timestamp"].values),
-        dtype=float,
-        count=len(candles),
-    )
 
 
 def plot_diagnostics(
@@ -246,9 +187,7 @@ if __name__ == "__main__":
     print(f"Candles loaded: {len(candles)}")
 
     print("Loading model predictions...")
-    predictions = _build_predictions(candles, args.figi, args.timeframe, load_from, display_to)
-    if predictions is None:
-        print("Running without model predictions.")
+    predictions, _ = build_predictions(candles, args.figi, args.timeframe, load_from, display_to)
 
     result = run_backtest(
         candles,
@@ -265,7 +204,7 @@ if __name__ == "__main__":
         predictions=predictions,
     )
 
-    out_dir = Path(__file__).parent / args.out
+    out_dir = BOT_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     date_tag = f"{display_from.date()}_{display_to.date()}"
     out_path = out_dir / f"diagnostics_{date_tag}.png"

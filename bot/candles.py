@@ -8,25 +8,16 @@ Usage:
                      datetime(2024, 1, 1, tzinfo=timezone.utc),
                      datetime(2024, 6, 1, tzinfo=timezone.utc))
 
-Requires TBANK_TOKEN env var (loaded automatically from bot/.env if present).
+Requires TBANK_TOKEN env var (loaded automatically from bot/.env by config.py).
 """
 import os
 import time
-from pathlib import Path
 
 import pandas as pd
 from tinkoff.invest import Client, CandleInterval
 from tinkoff.invest.exceptions import RequestError
 
-CACHE_DIR = Path(__file__).parent / "cache"
-
-# Load bot/.env once at import time so all scripts get the token automatically
-_env_path = Path(__file__).parent / ".env"
-if _env_path.exists():
-    for _line in _env_path.read_text().splitlines():
-        if _line.strip() and not _line.startswith("#") and "=" in _line:
-            _k, _v = _line.split("=", 1)
-            os.environ.setdefault(_k.strip(), _v.strip())
+from config import ASSETS, CACHE_DIR, PRIMARY_ASSET, PRIMARY_TF, TIMEFRAMES
 
 _INTERVALS = {
     "1min":  CandleInterval.CANDLE_INTERVAL_1_MIN,
@@ -122,3 +113,20 @@ def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
 
     mask = (cached["timestamp"] >= from_ts) & (cached["timestamp"] <= to_ts)
     return cached[mask].reset_index(drop=True)
+
+
+def load_all_candles(from_dt, to_dt, primary: pd.DataFrame | None = None) -> dict:
+    """Load candles for every configured (asset, timeframe) pair.
+
+    Returns {(asset, timeframe): DataFrame}. If `primary` is given, it is used
+    as-is for (PRIMARY_ASSET, PRIMARY_TF) instead of being loaded again.
+    """
+    all_candles = {}
+    for asset, figi in ASSETS.items():
+        for tf in TIMEFRAMES:
+            if primary is not None and asset == PRIMARY_ASSET and tf == PRIMARY_TF:
+                all_candles[(asset, tf)] = primary
+            else:
+                all_candles[(asset, tf)] = get_candles(figi, tf, from_dt, to_dt)
+            print(f"  {asset} {tf}: {len(all_candles[(asset, tf)])} bars")
+    return all_candles

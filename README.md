@@ -20,18 +20,22 @@ Create `bot/.env` with your T-Bank token (never commit this file):
 TBANK_TOKEN=t.your_token_here
 ```
 
-The token is loaded automatically at import time by `candles.py`.
+The token is loaded automatically at import time by `config.py`.
 
 ## Files
 
 | File | Purpose |
 |---|---|
+| `bot/config.py` | Shared config: assets, timeframes, date range, paths, `.env` loading |
 | `bot/candles.py` | Fetch OHLCV candles from T-Bank API with local CSV cache (`bot/cache/`) |
+| `bot/features.py` | Feature engineering for the model (no-lookahead multi-timeframe merge) |
+| `bot/model.py` | Load the latest trained model and build predictions aligned to a candle series |
 | `bot/backtest_mean_rev_bb.py` | Bollinger Band mean-reversion backtest; supports headless mode for grid search |
 | `bot/charts.py` | Four-panel chart: asset price+volume, equity curve, position, trading volume |
 | `bot/runner.py` | Run a single backtest and save chart to `outputs/backtest/` |
 | `bot/optimizer.py` | Parallel grid search over BB parameters; saves CSV + HTML to `outputs/optimizer/` |
 | `bot/train_lgbm.py` | Train a LightGBM model to predict the next 5-min close; saves model to `outputs/models/` |
+| `bot/diagnostics.py` | Price/BB/signals/equity chart for a specific time window; saves to `outputs/diagnostics/` |
 | `bot/find_figi.py` | Look up instrument FIGIs by ticker via the T-Bank API |
 
 ## Usage
@@ -88,3 +92,4 @@ All outputs are git-ignored.
 | `bot/outputs/backtest/` | `result.png` from `runner.py` |
 | `bot/outputs/optimizer/` | `results_<ticker>_<tf>.{csv,html}` from `optimizer.py` |
 | `bot/outputs/models/` | `lgbm_<timestamp>.txt` + `lgbm_<timestamp>_meta.json` from `train_lgbm.py` |
+| `bot/outputs/diagnostics/` | `diagnostics_<from>_<to>.png` from `diagnostics.py` |

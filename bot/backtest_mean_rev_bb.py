@@ -8,8 +8,8 @@ Strategy:
   - Flatten at the last bar of each day regardless.
   - Decision uses the *previous* bar's completed data; execution is at the *current* bar's open.
 
-headless=True skips per-bar list accumulation; returns a flat stats dict instead of
-equity/trades DataFrames. Use this for grid search / optimisation loops.
+headless=True returns a flat stats dict instead of equity/trades DataFrames.
+Use this for grid search / optimisation loops.
 """
 
 import numpy as np
@@ -39,7 +39,8 @@ def run_backtest(
     pred_long_threshold: float = 1.002,
     pred_short_threshold: float = 0.998,
 ) -> dict:
-    df = candles.copy().reset_index(drop=True)
+    df = candles.reset_index(drop=True)
+    n = len(df)
 
     mid = df["close"].ewm(alpha=bb_alpha).mean()
     std = df["close"].ewm(alpha=bb_alpha).std()
@@ -52,14 +53,14 @@ def run_backtest(
     in_session = (ts_dt.dt.hour >= session_start_utc) & (ts_dt.dt.hour < session_end_utc)
 
     date = ts_dt.dt.date.to_numpy()
-    is_last_bar = np.empty(len(df), dtype=bool)
+    is_last_bar = np.empty(n, dtype=bool)
     is_last_bar[:-1] = date[:-1] != date[1:]
     is_last_bar[-1] = True
 
     session_a = in_session.to_numpy()
 
     # Last in-session bar: session is True now and False on the next bar (or last bar overall).
-    is_session_end = np.empty(len(df), dtype=bool)
+    is_session_end = np.empty(n, dtype=bool)
     is_session_end[:-1] = session_a[:-1] & ~session_a[1:]
     is_session_end[-1] = False
 
@@ -71,30 +72,20 @@ def run_backtest(
     lower_a = lower.to_numpy()
     trending_a = trending.to_numpy()
 
+    # --- Simulate ---
     position = 0
     cash = float(initial_cash)
-    peak_exposure = 0.0
     desired = 0
     entry_bar = 0
+    peak_exposure = 0.0
+    total_fees = 0.0
+    trade_rows = []
+    equity = np.empty(n)
+    pos_hist = np.empty(n, dtype=np.int64)
 
-    if headless:
-        running_max_eq = float(initial_cash)
-        max_dd_abs = 0.0
-        n_trades = 0
-        n_entries = 0
-        total_bars_held = 0
-        turnover = 0.0
-        total_fees = 0.0
-        daily_eq_vals = [float(initial_cash)]  # seed with t=0 so first day's return isn't dropped
-        _prev_date = None
-        _last_eq = float(initial_cash)
-    else:
-        equity_rows = []
-        trade_rows = []
-        total_fees = 0.0
-
-    for i in range(len(df)):
+    for i in range(n):
         # Decide desired position using the previous bar's completed data.
+        # (i == 0 has no previous bar; desired stays 0.)
         if i > 0:
             p = i - 1
             if np.isnan(mid_a[p]) or is_last_bar[p] or is_session_end[p]:
@@ -102,10 +93,7 @@ def run_backtest(
             elif position != 0:
                 bars_held = i - entry_bar
                 hit_midband = (position > 0 and closes[p] >= mid_a[p]) or (position < 0 and closes[p] <= mid_a[p])
-                if hit_midband or bars_held >= time_stop_bars:
-                    desired = 0
-                else:
-                    desired = position
+                desired = 0 if hit_midband or bars_held >= time_stop_bars else position
             elif session_a[p] and trending_a[p]:
                 if predictions is not None:
                     pred = float(predictions[i])
@@ -114,20 +102,13 @@ def run_backtest(
                 else:
                     want_long = closes[p] < lower_a[p]
                     want_short = closes[p] > upper_a[p]
-                if want_long:
-                    desired = position_size
-                elif want_short:
-                    desired = -position_size
-                else:
-                    desired = 0
+                desired = position_size if want_long else -position_size if want_short else 0
             else:
                 desired = 0
-        # i == 0: no previous bar, desired stays 0
 
         # Execute at this bar's open.
         delta = desired - position
         if delta != 0:
-            prev_pos = position
             notional = abs(delta) * opens[i]
             fee = notional * fee_rate
             total_fees += fee
@@ -136,74 +117,59 @@ def run_backtest(
             if position != 0:
                 entry_bar = i
             peak_exposure = max(peak_exposure, abs(position) * opens[i])
-            if headless:
-                if prev_pos == 0 and position != 0:
-                    n_entries += 1
-                n_trades += 1
-                turnover += notional
-            else:
-                trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i], "fee": fee})
+            trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i], "fee": fee})
 
-        eq_val = cash + position * closes[i]
+        pos_hist[i] = position
+        equity[i] = cash + position * closes[i]
 
-        if headless:
-            bar_date = date[i]
-            if bar_date != _prev_date:
-                if _prev_date is not None:
-                    daily_eq_vals.append(_last_eq)
-                _prev_date = bar_date
-            _last_eq = eq_val
-            if eq_val > running_max_eq:
-                running_max_eq = eq_val
-            dd = eq_val - running_max_eq
-            if dd < max_dd_abs:
-                max_dd_abs = dd
-            if position != 0:
-                total_bars_held += 1
-        else:
-            equity_rows.append({"timestamp": timestamps[i], "equity": eq_val, "position": position})
+    trades = pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame(columns=["timestamp", "qty", "price", "fee"])
 
-    # --- Return ---
-    if headless:
-        daily_eq_vals.append(_last_eq)
-        pnl = _last_eq - initial_cash
-        t0 = pd.to_datetime(timestamps[0], utc=True)
-        t1 = pd.to_datetime(timestamps[-1], utc=True)
-        n_days = max((t1 - t0).days, 1)
-
-        if peak_exposure > 0 and len(daily_eq_vals) >= 2:
-            daily_pnl = np.diff(np.array(daily_eq_vals, dtype=float))
-            daily_ret = daily_pnl / peak_exposure
-            mean_r = float(daily_ret.mean())
-            std_r = float(daily_ret.std())
-            sharpe = mean_r / std_r * np.sqrt(252) if std_r > 0 else 0.0
-            neg = daily_ret[daily_ret < 0]
-            s_std = float(neg.std()) if len(neg) > 1 else 0.0
-            sortino = mean_r / s_std * np.sqrt(252) if s_std > 0 else 0.0
-            base = 1 + pnl / peak_exposure
-            cagr = base ** (365 / n_days) - 1 if base > 0 else -1.0
-            max_dd = max_dd_abs / peak_exposure
-        else:
-            sharpe = sortino = cagr = max_dd = 0.0
-
-        avg_bars_held = total_bars_held / n_entries if n_entries > 0 else 0.0
-
+    if not headless:
         return {
-            "pnl": round(pnl, 2),
-            "sharpe": round(sharpe, 4),
-            "sortino": round(sortino, 4),
-            "max_dd": round(max_dd, 4),
-            "cagr": round(cagr, 4),
-            "n_trades": n_trades,
-            "avg_bars_held": round(avg_bars_held, 2),
-            "turnover": round(turnover, 2),
-            "total_fees": round(total_fees, 2),
-            "peak_exposure": round(peak_exposure, 2),
-        }
-    else:
-        return {
-            "equity": pd.DataFrame(equity_rows),
-            "trades": pd.DataFrame(trade_rows) if trade_rows else pd.DataFrame(columns=["timestamp", "qty", "price", "fee"]),
+            "equity": pd.DataFrame({"timestamp": timestamps, "equity": equity, "position": pos_hist}),
+            "trades": trades,
             "total_fees": total_fees,
             "peak_exposure": peak_exposure,
         }
+
+    # --- Stats (headless) ---
+    pnl = equity[-1] - initial_cash
+    t0 = pd.to_datetime(timestamps[0], utc=True)
+    t1 = pd.to_datetime(timestamps[-1], utc=True)
+    n_days = max((t1 - t0).days, 1)
+
+    n_entries = int(np.sum((pos_hist[1:] != 0) & (pos_hist[:-1] == 0)))
+    total_bars_held = int(np.sum(pos_hist != 0))
+    avg_bars_held = total_bars_held / n_entries if n_entries > 0 else 0.0
+    turnover = float((trades["qty"].abs() * trades["price"]).sum())
+
+    # Daily equity: seed with t=0 so the first day's return isn't dropped.
+    daily_eq = np.concatenate(([initial_cash], equity[is_last_bar]))
+
+    if peak_exposure > 0 and len(daily_eq) >= 2:
+        daily_ret = np.diff(daily_eq) / peak_exposure
+        mean_r = float(daily_ret.mean())
+        std_r = float(daily_ret.std())
+        sharpe = mean_r / std_r * np.sqrt(252) if std_r > 0 else 0.0
+        neg = daily_ret[daily_ret < 0]
+        s_std = float(neg.std()) if len(neg) > 1 else 0.0
+        sortino = mean_r / s_std * np.sqrt(252) if s_std > 0 else 0.0
+        base = 1 + pnl / peak_exposure
+        cagr = base ** (365 / n_days) - 1 if base > 0 else -1.0
+        running_max = np.maximum.accumulate(np.maximum(equity, initial_cash))
+        max_dd = float(min((equity - running_max).min(), 0.0)) / peak_exposure
+    else:
+        sharpe = sortino = cagr = max_dd = 0.0
+
+    return {
+        "pnl": round(pnl, 2),
+        "sharpe": round(sharpe, 4),
+        "sortino": round(sortino, 4),
+        "max_dd": round(max_dd, 4),
+        "cagr": round(cagr, 4),
+        "n_trades": len(trades),
+        "avg_bars_held": round(avg_bars_held, 2),
+        "turnover": round(turnover, 2),
+        "total_fees": round(total_fees, 2),
+        "peak_exposure": round(peak_exposure, 2),
+    }

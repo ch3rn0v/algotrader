@@ -19,7 +19,6 @@ Or from code:
 """
 
 import argparse
-import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
@@ -27,7 +26,6 @@ from itertools import product
 from pathlib import Path
 from typing import Optional
 
-import lightgbm as lgbm
 import matplotlib
 
 matplotlib.use("Agg")
@@ -37,14 +35,8 @@ import pandas as pd
 
 from backtest_mean_rev_bb import run_backtest
 from candles import get_candles
-from train_lgbm import (
-    ASSETS as LGBM_ASSETS,
-    MODEL_DIR,
-    PRIMARY_ASSET,
-    PRIMARY_TF,
-    TIMEFRAMES as LGBM_TIMEFRAMES,
-    build_features,
-)
+from config import BOT_DIR
+from model import build_predictions
 
 RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "turnover", "total_fees", "peak_exposure"]
 
@@ -251,50 +243,15 @@ if __name__ == "__main__":
     candles = get_candles(args.figi, args.timeframe, from_dt, to_dt)
     print(f"Candles: {len(candles)}")
 
-    # Load model predictions if a model exists for this instrument/timeframe.
-    predictions = None
-    meta_files = sorted(MODEL_DIR.glob("lgbm_*_meta.json"))
-    if meta_files and args.figi == LGBM_ASSETS.get(PRIMARY_ASSET) and args.timeframe == PRIMARY_TF:
-        meta_path = meta_files[-1]
-        model_path = MODEL_DIR / meta_path.name.replace("_meta.json", ".txt")
-        meta = json.loads(meta_path.read_text())
-        feature_cols = meta["feature_cols"]
-
-        lgbm_model = lgbm.Booster(model_file=str(model_path))
-        print(f"Using model: {model_path.name}")
-
-        print("Loading candles for feature engineering...")
-        all_candles = {(PRIMARY_ASSET, PRIMARY_TF): candles}
-        for asset in LGBM_ASSETS:
-            for tf in LGBM_TIMEFRAMES:
-                if not (asset == PRIMARY_ASSET and tf == PRIMARY_TF):
-                    all_candles[(asset, tf)] = get_candles(LGBM_ASSETS[asset], tf, from_dt, to_dt)
-
-        features = build_features(all_candles)
-        null_cols = [c for c in features.columns if features[c].isna().all()]
-        if null_cols:
-            features = features.drop(columns=null_cols)
-
-        missing = [c for c in feature_cols if c not in features.columns]
-        if missing:
-            print(f"WARNING: {len(missing)} feature columns missing — running without predictions.")
-        else:
-            preds_all = lgbm_model.predict(features[feature_cols])
-            pred_map = dict(zip(features["timestamp"].values, preds_all))
-            predictions = np.fromiter(
-                (pred_map.get(ts, 1.0) for ts in candles["timestamp"].values),
-                dtype=float,
-                count=len(candles),
-            )
-            print(f"Predictions: {len(predictions)} bars, mean={predictions.mean():.5f}")
-
-            train_end_ts = pd.Timestamp(meta["train_end_ts"])
-            test_mask = candles["timestamp"] > train_end_ts
-            print(f"Using test period: {test_mask.sum()} / {len(candles)} bars (after {train_end_ts})")
-            candles = candles.loc[test_mask].reset_index(drop=True)
-            predictions = predictions[test_mask.values]
-    else:
-        print("No model found (or non-primary instrument) — running without predictions.")
+    # Load model predictions if a model exists for this instrument/timeframe,
+    # and restrict the sweep to the model's test period.
+    predictions, meta = build_predictions(candles, args.figi, args.timeframe, from_dt, to_dt, fill=1.0)
+    if predictions is not None:
+        train_end_ts = pd.Timestamp(meta["train_end_ts"])
+        test_mask = candles["timestamp"] > train_end_ts
+        print(f"Using test period: {test_mask.sum()} / {len(candles)} bars (after {train_end_ts})")
+        candles = candles.loc[test_mask].reset_index(drop=True)
+        predictions = predictions[test_mask.values]
 
     results = optimize(
         candles,
@@ -313,6 +270,6 @@ if __name__ == "__main__":
             "position_size": 1,
         },
         n_jobs=args.jobs,
-        out_dir=Path(__file__).parent / args.out,
+        out_dir=BOT_DIR / args.out,
         predictions=predictions,
     )
