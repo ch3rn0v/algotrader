@@ -33,5 +33,6 @@ trading_bot/reports/
 .vscode/
 
 # Other
+.DS_Store
 *TODO.md
 *.~lock*

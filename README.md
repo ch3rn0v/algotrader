@@ -12,6 +12,8 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install git+https://github.com/RussianInvestments/invest-python.git --no-deps
+
+# For Mac OS: `brew install libomp`
 ```
 
 Create `bot/.env` with your T-Bank token (never commit this file):
