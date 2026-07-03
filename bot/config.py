@@ -16,7 +16,9 @@ MODEL_DIR = OUTPUT_DIR / "models"
 ASSETS = {
     "SBERP": "BBG0047315Y7",
     "TMOS": "TCSM61901X76",  # T's proxy for Moscow Exchange index
-    "PLZL": "BBG000R607Y3",  # Polyus Gold
+    "PLZL": "BBG000R607Y3",
+    "SIBN": "BBG004S684M6",
+    "PHOR": "BBG004S689R0",
 }
 PRIMARY_ASSET = "SBERP"
 PRIMARY_FIGI = ASSETS[PRIMARY_ASSET]
