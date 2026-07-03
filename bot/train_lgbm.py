@@ -1,13 +1,22 @@
 """Train a LightGBM model to predict the current 5-min bar's return for SBERP.
 
-Features: OHLCV-derived features for SBERP, TMOS, PLZL at 5m, 15m, 30m, 1h timeframes.
-Target:   close[t] / close[t-1] — return of the current 5-min bar.
-Metric:   Pearson correlation (np.corrcoef) between predicted and actual return.
+Pipeline:
+  1. base features for all (asset, timeframe) pairs (features.py)
+  2. iterative pairwise feature generation, fit on train only (feature_generator.py)
+  3. greedy correlation-based feature selection on train only (feature_selector.py)
+  4. optuna hyperparameter tuning on a train/validation split (tuner.py)
+  5. final fit on the full train set, evaluation on the held-out test set
+
+Target: close[t] / close[t-1] — return of the current 5-min bar.
+Metric: Pearson correlation between predicted and actual return.
 
 Usage (from repo root, with venv activated):
-    python3 bot/train_lgbm.py
+    python3 bot/train_lgbm.py                     # full pipeline, defaults
+    python3 bot/train_lgbm.py --gen-iterations 0  # skip feature generation
+    python3 bot/train_lgbm.py --trials 0          # skip tuning, use default params
 """
 
+import argparse
 import json
 import time
 from datetime import datetime
@@ -17,12 +26,15 @@ import numpy as np
 
 from candles import load_all_candles
 from config import ASSETS, FROM, MODEL_DIR, PRIMARY_ASSET, PRIMARY_TF, TIMEFRAMES, TO
+from feature_generator import apply_recipes, generate_features
+from feature_selector import select_features
 from features import build_features
+from tuner import tune
 
 TRAIN_RATIO = 0.3  # first 30% for training, last 70% for test
 
 max_depth = 4
-LGBM_PARAMS = {
+DEFAULT_LGBM_PARAMS = {
     "objective": "regression",
     "metric": "rmse",
     "n_estimators": 200,
@@ -34,7 +46,20 @@ LGBM_PARAMS = {
 }
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description="Train the SBERP 5m return model")
+    p.add_argument("--gen-iterations", type=int, default=2, help="feature generator iterations (0 = skip, default 2)")
+    p.add_argument("--min-target-corr", type=float, default=0.02, help="generator: discard candidates below this |corr| with target (default 0.02)")
+    p.add_argument("--gen-max-new", type=int, default=200, help="generator: max new features kept per iteration (default 200)")
+    p.add_argument("--max-features", type=int, default=300, help="selector: max selected features (default 300)")
+    p.add_argument("--max-inter-corr", type=float, default=0.9, help="selector: max |corr| between selected features (default 0.9)")
+    p.add_argument("--trials", type=int, default=30, help="optuna trials (0 = skip tuning, default 30)")
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
+
     # 1. Download / load candles (cache is handled by get_candles)
     print(f"Loading {len(ASSETS) * len(TIMEFRAMES)} candle series...")
     all_candles = load_all_candles(FROM, TO)
@@ -66,10 +91,9 @@ def main():
 
     # Exclude primary timestamp, per-series source timestamps, and target from features.
     ts_cols = {"timestamp"} | {c for c in features.columns if c.endswith("_ts")}
-    feature_cols = [c for c in features.columns if c not in ts_cols and c != "target"]
-    print(f"Feature matrix: {len(features)} rows × {len(feature_cols)} features")
+    base_cols = [c for c in features.columns if c not in ts_cols and c != "target"]
+    print(f"Feature matrix: {len(features)} rows × {len(base_cols)} base features")
 
-    X = features[feature_cols]
     y = features["target"].to_numpy()
 
     # 3. Temporal train/test split — no shuffling
@@ -79,19 +103,56 @@ def main():
             f"TRAIN_RATIO={TRAIN_RATIO} yields 0 training rows from {len(features)} total. "
             f"Increase TRAIN_RATIO or extend the date range."
         )
-    X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y[:split], y[split:]
-    print(f"\nTrain: {len(X_train)} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
-    print(f"Test:  {len(X_test)} rows  ({features['timestamp'].iloc[split]} → {features['timestamp'].iloc[-1]})")
+    print(f"\nTrain: {split} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
+    print(f"Test:  {len(features) - split} rows  ({features['timestamp'].iloc[split]} → {features['timestamp'].iloc[-1]})")
 
-    # 4. Train
-    print(f"\nTraining LightGBM ({LGBM_PARAMS['n_estimators']} trees, max_depth={LGBM_PARAMS['max_depth']})...")
+    # 4. Feature generation — fit on train rows only, then applied to all rows.
+    recipes = []
+    if args.gen_iterations > 0:
+        print("\nGenerating features (train data only)...")
+        t0 = time.time()
+        recipes = generate_features(
+            features.iloc[:split],
+            y_train,
+            base_cols,
+            n_iterations=args.gen_iterations,
+            min_target_corr=args.min_target_corr,
+            max_new_per_iter=args.gen_max_new,
+        )
+        features = apply_recipes(features, recipes)
+        print(f"Feature generation: {len(recipes)} new features in {time.time() - t0:.1f}s")
+
+    all_cols = base_cols + [r["name"] for r in recipes]
+
+    # 5. Feature selection — train rows only.
+    print("\nSelecting features (train data only)...")
+    feature_cols = select_features(
+        features.iloc[:split],
+        y_train,
+        all_cols,
+        max_features=args.max_features,
+        max_inter_corr=args.max_inter_corr,
+    )
+
+    X = features[feature_cols]
+    X_train, X_test = X.iloc[:split], X.iloc[split:]
+
+    # 6. Hyperparameter tuning on a temporal train/validation split.
+    if args.trials > 0:
+        print("\nTuning hyperparameters...")
+        lgbm_params = tune(X_train, y_train, n_trials=args.trials)
+    else:
+        lgbm_params = dict(DEFAULT_LGBM_PARAMS)
+
+    # 7. Final fit on the full train set.
+    print(f"\nTraining LightGBM ({lgbm_params['n_estimators']} trees, max_depth={lgbm_params['max_depth']})...")
     t0 = time.time()
-    model = lgbm.LGBMRegressor(**LGBM_PARAMS)
+    model = lgbm.LGBMRegressor(**lgbm_params)
     model.fit(X_train, y_train)
     train_time = time.time() - t0
 
-    # 5. Evaluate
+    # 8. Evaluate
     pred_train = model.predict(X_train)
     pred_test = model.predict(X_test)
     corr_train = float(np.corrcoef(y_train, pred_train)[0, 1])
@@ -100,7 +161,7 @@ def main():
     print(f"Corr (train):   {corr_train:.4f}")
     print(f"Corr (test):    {corr_test:.4f}")
 
-    # 6. Save model
+    # 9. Save model
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_path = MODEL_DIR / f"lgbm_{ts}.txt"
@@ -134,8 +195,12 @@ def main():
         "train_end_ts": str(features["timestamp"].iloc[split - 1]),
         "n_train": len(X_train),
         "n_test": len(X_test),
+        "n_base_features": len(base_cols),
+        "gen_iterations": args.gen_iterations,
+        "gen_recipes": recipes,
         "feature_cols": feature_cols,
-        "lgbm_params": LGBM_PARAMS,
+        "tuning_trials": args.trials,
+        "lgbm_params": lgbm_params,
         "corr_train": round(corr_train, 6),
         "corr_test": round(corr_test, 6),
         "train_time_s": round(train_time, 2),

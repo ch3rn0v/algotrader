@@ -7,6 +7,7 @@ import pandas as pd
 
 from candles import load_all_candles
 from config import MODEL_DIR, PRIMARY_FIGI, PRIMARY_TF
+from feature_generator import apply_recipes
 from features import build_features
 
 
@@ -58,6 +59,7 @@ def build_predictions(
     all_candles = load_all_candles(from_dt, to_dt, primary=candles)
     features = build_features(all_candles)
     features = features.drop(columns=[c for c in features.columns if features[c].isna().all()])
+    features = apply_recipes(features, meta.get("gen_recipes", []))
 
     missing = [c for c in meta["feature_cols"] if c not in features.columns]
     if missing:
