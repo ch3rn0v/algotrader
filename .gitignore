@@ -28,6 +28,9 @@ trading_bot/reports/
 # Pytest
 .pytest_cache/
 
+# Jupyter
+*.ipynb_checkpoints
+
 # IDE
 .idea/
 .vscode/

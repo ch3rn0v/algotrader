@@ -68,6 +68,8 @@ python3 bot/find_figi.py PLZL
 python3 bot/find_figi.py IMOEX
 ```
 
+**Jupyter Lab:** `./lab` (serves the repo root using the project venv)
+
 ## Strategy
 
 Bollinger Band mean reversion, targeting the choppy MOEX midday session (12:00–15:00 MSK = 09:00–12:00 UTC):
