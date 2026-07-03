@@ -9,7 +9,7 @@ Requires Python 3.10+.
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source venv/bin/activate
 pip install -r requirements.txt
 pip install git+https://github.com/RussianInvestments/invest-python.git --no-deps
 
