@@ -1,7 +1,7 @@
-"""Grid-search optimiser for BB mean reversion parameters.
+"""Grid-search optimiser for EWM mean reversion parameters.
 
 Usage:
-    # defaults: SBERP, 5min, 2025, all CPUs
+    # defaults: SBERP, 1min, 2025, all CPUs
     python3 bot/optimizer.py
 
     # custom dates and instrument
@@ -33,12 +33,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from backtest_mean_rev_bb import run_backtest
+from backtest_mean_rev_ewm import run_backtest
 from candles import get_candles
 from config import BOT_DIR
 from model import build_predictions
 
-RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "turnover", "total_fees", "peak_exposure"]
+RESULT_COLS = ["pnl", "sharpe", "sortino", "max_dd", "cagr", "n_trades", "avg_bars_held", "pct_bars_in_pos", "turnover", "total_fees", "peak_exposure"]
 
 
 def _run_one(args: tuple) -> dict:
@@ -55,6 +55,7 @@ _FMT = {
     "cagr": lambda v: f"{v:.3f}",
     "n_trades": lambda v: f"{v:.0f}",
     "avg_bars_held": lambda v: f"{v:.1f}",
+    "pct_bars_in_pos": lambda v: f"{v:.1f}",
     "turnover": lambda v: f"{v:,.0f}",
     "total_fees": lambda v: f"{v:,.0f}",
     "peak_exposure": lambda v: f"{v:,.0f}",
@@ -228,9 +229,9 @@ def optimize(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="BB mean reversion grid optimiser")
+    parser = argparse.ArgumentParser(description="EWM mean reversion grid optimiser")
     parser.add_argument("--figi", default="BBG0047315Y7", help="Instrument FIGI (default: SBERP)")
-    parser.add_argument("--timeframe", default="5min", help="Candle timeframe (default: 5min)")
+    parser.add_argument("--timeframe", default="1min", help="Candle timeframe (default: 1min)")
     parser.add_argument("--from", dest="date_from", default="2025-01-01", metavar="DATE", help="Start date YYYY-MM-DD (default: 2025-01-01)")
     parser.add_argument("--to", dest="date_to", default="2026-01-01", metavar="DATE", help="End date YYYY-MM-DD (default: 2026-01-01)")
     parser.add_argument("--jobs", type=int, default=None, help="Parallel workers (default: all CPUs)")
@@ -257,16 +258,20 @@ if __name__ == "__main__":
         candles,
         label=f"{args.figi}_{args.timeframe}",
         param_grid={
-            "bb_alpha": [0.05, 0.1, 0.15, 0.2],
-            "bb_std": [1.5, 2.0, 2.5],
-            "time_stop_bars": [16, 20, 24, 30],
-            "session_end_utc": [12, 14, 15, 16, 17],
-            "width_alpha": [0.05, 0.1, 0.2],
-            "pred_long_threshold": [1.0, 1.0005, 1.001, 1.002],
-            "pred_short_threshold": [1.0, 0.9995, 0.999, 0.998],
+            "trend_alpha": [0.005, 0.01, 0.02, 0.05],
+            "entry_pct": [0.1, 0.15, 0.25, 0.4],
+            "exit_pct": [0.0, 0.05, 0.1],
+            "max_slope_pct": [0.03, 0.06, 0.12],
+            "vol_ratio_max": [0.7, 0.9, 1.1],
+            "min_quiet_bars": [2, 10, 30],
+            "time_stop_bars": [30, 60, 120],
         },
         fixed_params={
+            "slope_window": 15,
+            "vol_alpha": 0.05,
+            "vol_window": 240,
             "session_start_utc": 9,
+            "session_end_utc": 16,
             "position_size": 1,
         },
         n_jobs=args.jobs,

@@ -8,8 +8,8 @@ Workflow:
 
 Usage:
     python3 bot/runner.py                          # best params from optimizer
-    python3 bot/runner.py --bb-alpha 0.05          # override specific params
-    python3 bot/runner.py --bb-std 2.0 --session-end-utc 14
+    python3 bot/runner.py --trend-alpha 0.05       # override specific params
+    python3 bot/runner.py --entry-pct 0.4 --session-end-utc 14
 """
 
 import argparse
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from backtest_mean_rev_bb import run_backtest
+from backtest_mean_rev_ewm import run_backtest
 from candles import get_candles
 from charts import plot_results
 from config import FROM, OUTPUT_DIR, PRIMARY_ASSET, PRIMARY_FIGI, PRIMARY_TF, TO
@@ -30,10 +30,16 @@ OUT_DIR = OUTPUT_DIR / "backtest"
 def parse_args() -> dict:
     """Optional backtest param overrides; any provided value beats the optimizer's best."""
     parser = argparse.ArgumentParser(description="Run backtest with best optimizer params")
-    parser.add_argument("--bb-alpha",             type=float)
-    parser.add_argument("--bb-std",               type=float)
+    parser.add_argument("--trend-alpha",           type=float)
+    parser.add_argument("--entry-pct",             type=float)
+    parser.add_argument("--exit-pct",              type=float)
+    parser.add_argument("--max-slope-pct",         type=float)
+    parser.add_argument("--slope-window",          type=int)
+    parser.add_argument("--vol-alpha",             type=float)
+    parser.add_argument("--vol-window",            type=int)
+    parser.add_argument("--vol-ratio-max",         type=float)
+    parser.add_argument("--min-quiet-bars",        type=int)
     parser.add_argument("--time-stop-bars",        type=int)
-    parser.add_argument("--width-alpha",           type=float)
     parser.add_argument("--session-start-utc",     type=int)
     parser.add_argument("--session-end-utc",       type=int)
     parser.add_argument("--position-size",         type=int)
@@ -51,7 +57,13 @@ def main():
 
     opt_df = pd.read_csv(csv_path)  # already sorted by sortino descending
     best = opt_df.iloc[0]
-    bt_params = {k: best[k] for k in opt_df.columns if k not in RESULT_COLS}
+    # pd.read_csv yields floats for every numeric column; restore the int params.
+    int_params = {"slope_window", "vol_window", "min_quiet_bars", "time_stop_bars",
+                  "session_start_utc", "session_end_utc", "position_size"}
+    bt_params = {
+        k: int(best[k]) if k in int_params else best[k]
+        for k in opt_df.columns if k not in RESULT_COLS
+    }
 
     overrides = parse_args()
     bt_params.update(overrides)
@@ -91,7 +103,9 @@ def main():
     peak_exposure = result["peak_exposure"]
 
     pnl = equity["equity"].iloc[-1] - equity["equity"].iloc[0]
+    pct_in_pos = (equity["position"] != 0).mean() * 100
     print(f"\nTrades:        {len(trades)}")
+    print(f"Bars in pos:   {pct_in_pos:.1f}%")
     print(f"Total P&L:     {pnl:+,.2f}")
     print(f"Peak exposure: {peak_exposure:,.2f}")
     if peak_exposure > 0:

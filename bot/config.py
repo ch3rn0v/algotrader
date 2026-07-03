@@ -22,8 +22,8 @@ ASSETS = {
 }
 PRIMARY_ASSET = "SBERP"
 PRIMARY_FIGI = ASSETS[PRIMARY_ASSET]
-PRIMARY_TF = "5min"
-TIMEFRAMES = ["5min", "15min", "30min", "1h"]
+PRIMARY_TF = "1min"
+TIMEFRAMES = ["1min", "5min", "15min", "30min", "1h"]
 
 FROM = datetime(2025, 1, 1, tzinfo=timezone.utc)
 TO = datetime(2026, 1, 1, tzinfo=timezone.utc)

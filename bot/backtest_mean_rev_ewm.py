@@ -1,12 +1,21 @@
-"""Bollinger Band mean reversion backtest.
+"""EWM-trend mean reversion backtest.
 
 Strategy:
-  - Active only during a configurable intraday session (default 12:00–15:00 MSK = 09:00–12:00 UTC).
-  - Enter long when close < lower band; enter short when close > upper band.
-  - Only enter when the market is ranging: BB width is below its own rolling median.
-  - Exit at the middle band (mean reversion target), after `time_stop_bars`, or at session end.
-  - Flatten at the last bar of each day regardless.
-  - Decision uses the *previous* bar's completed data; execution is at the *current* bar's open.
+  - Trend = EWM of close with `trend_alpha`.
+  - Trade only in a "quiet" market, where mean reversion is more probable:
+      * the trend is not too obvious: |trend % change over `slope_window` bars|
+        is below `max_slope_pct`;
+      * traded volume is low: EWM of volume is below `vol_ratio_max` x its
+        rolling mean over `vol_window` bars;
+      * both conditions have held for at least `min_quiet_bars` consecutive bars.
+  - Enter when price has strayed too far from the trend: long when close is
+    `entry_pct`% below the trend, short when `entry_pct`% above it.
+  - Exit near the trend (within `exit_pct`%), after `time_stop_bars`, or at
+    session end. Flatten at the last bar of each day regardless.
+  - Active only during a configurable intraday session (default 12:00-19:00 MSK
+    = 09:00-16:00 UTC).
+  - Decision uses the *previous* bar's completed data; execution is at the
+    *current* bar's open.
 
 headless=True returns a flat stats dict instead of equity/trades DataFrames.
 Use this for grid search / optimisation loops.
@@ -18,10 +27,16 @@ import pandas as pd
 
 def run_backtest(
     candles: pd.DataFrame,
-    bb_alpha: float = 0.1,
-    bb_std: float = 1.5,
-    time_stop_bars: int = 16,
-    width_alpha: float = 0.2,
+    trend_alpha: float = 0.02,
+    entry_pct: float = 0.3,
+    exit_pct: float = 0.05,
+    max_slope_pct: float = 0.05,
+    slope_window: int = 15,
+    vol_alpha: float = 0.05,
+    vol_window: int = 240,
+    vol_ratio_max: float = 0.9,
+    min_quiet_bars: int = 10,
+    time_stop_bars: int = 60,
     session_start_utc: int = 9,
     session_end_utc: int = 16,
     position_size: int = 1,
@@ -34,7 +49,7 @@ def run_backtest(
     # Optional array of model predictions aligned with candles.
     # predictions[i] is the predicted close[i]/close[i-1] for bar i.
     # When provided, only enter long if pred > pred_long_threshold and only enter short if pred < pred_short_threshold.
-    # When None, the plain BB signal is used with no model filter.
+    # When None, the plain deviation signal is used with no model filter.
     predictions: np.ndarray | None = None,
     pred_long_threshold: float = 1.002,
     pred_short_threshold: float = 0.998,
@@ -42,13 +57,24 @@ def run_backtest(
     df = candles.reset_index(drop=True)
     n = len(df)
 
-    mid = df["close"].ewm(alpha=bb_alpha).mean()
-    std = df["close"].ewm(alpha=bb_alpha).std()
-    upper = mid + bb_std * std
-    lower = mid - bb_std * std
-    width = (upper - lower) / mid
+    trend = df["close"].ewm(alpha=trend_alpha).mean()
+    dev_pct = (df["close"] / trend - 1.0) * 100.0
 
-    trending = width > width.ewm(alpha=width_alpha).mean()
+    # Quiet-market filters.
+    slope_pct = (trend / trend.shift(slope_window) - 1.0).abs() * 100.0
+    flat_trend = slope_pct < max_slope_pct
+    # Mean vs mean: a median baseline sits far below the EWM on skewed 1min
+    # volumes, making "low volume" unreachable.
+    vol_fast = df["volume"].ewm(alpha=vol_alpha).mean()
+    vol_base = df["volume"].rolling(vol_window).mean()
+    low_vol = vol_fast < vol_ratio_max * vol_base
+    quiet = (flat_trend & low_vol).to_numpy()
+
+    # quiet_run[i] = number of consecutive quiet bars ending at i.
+    q = quiet.astype(np.int64)
+    cs = np.cumsum(q)
+    quiet_run = cs - np.maximum.accumulate(np.where(q == 0, cs, 0))
+
     ts_dt = pd.to_datetime(df["timestamp"])
     in_session = (ts_dt.dt.hour >= session_start_utc) & (ts_dt.dt.hour < session_end_utc)
 
@@ -67,10 +93,7 @@ def run_backtest(
     closes = df["close"].to_numpy()
     opens = df["open"].to_numpy()
     timestamps = df["timestamp"].to_numpy()
-    mid_a = mid.to_numpy()
-    upper_a = upper.to_numpy()
-    lower_a = lower.to_numpy()
-    trending_a = trending.to_numpy()
+    dev_a = dev_pct.to_numpy()
 
     # --- Simulate ---
     position = 0
@@ -88,20 +111,20 @@ def run_backtest(
         # (i == 0 has no previous bar; desired stays 0.)
         if i > 0:
             p = i - 1
-            if np.isnan(mid_a[p]) or is_last_bar[p] or is_session_end[p]:
+            if np.isnan(dev_a[p]) or is_last_bar[p] or is_session_end[p]:
                 desired = 0
             elif position != 0:
                 bars_held = i - entry_bar
-                hit_midband = (position > 0 and closes[p] >= mid_a[p]) or (position < 0 and closes[p] <= mid_a[p])
-                desired = 0 if hit_midband or bars_held >= time_stop_bars else position
-            elif session_a[p] and trending_a[p]:
+                near_trend = (position > 0 and dev_a[p] >= -exit_pct) or (position < 0 and dev_a[p] <= exit_pct)
+                desired = 0 if near_trend or bars_held >= time_stop_bars else position
+            elif session_a[p] and quiet_run[p] >= min_quiet_bars:
                 if predictions is not None:
                     pred = float(predictions[i])
-                    want_long = closes[p] < lower_a[p] and pred > pred_long_threshold
-                    want_short = closes[p] > upper_a[p] and pred < pred_short_threshold
+                    want_long = dev_a[p] <= -entry_pct and pred > pred_long_threshold
+                    want_short = dev_a[p] >= entry_pct and pred < pred_short_threshold
                 else:
-                    want_long = closes[p] < lower_a[p]
-                    want_short = closes[p] > upper_a[p]
+                    want_long = dev_a[p] <= -entry_pct
+                    want_short = dev_a[p] >= entry_pct
                 desired = position_size if want_long else -position_size if want_short else 0
             else:
                 desired = 0
@@ -141,6 +164,7 @@ def run_backtest(
     n_entries = int(np.sum((pos_hist[1:] != 0) & (pos_hist[:-1] == 0)))
     total_bars_held = int(np.sum(pos_hist != 0))
     avg_bars_held = total_bars_held / n_entries if n_entries > 0 else 0.0
+    pct_bars_in_pos = total_bars_held / n * 100 if n > 0 else 0.0
     turnover = float((trades["qty"].abs() * trades["price"]).sum())
 
     # Daily equity: seed with t=0 so the first day's return isn't dropped.
@@ -169,6 +193,7 @@ def run_backtest(
         "cagr": round(cagr, 4),
         "n_trades": len(trades),
         "avg_bars_held": round(avg_bars_held, 2),
+        "pct_bars_in_pos": round(pct_bars_in_pos, 2),
         "turnover": round(turnover, 2),
         "total_fees": round(total_fees, 2),
         "peak_exposure": round(peak_exposure, 2),

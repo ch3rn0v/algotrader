@@ -52,9 +52,10 @@ def build_predictions(
     loaded = load_latest_model()
     if loaded is None:
         return fail(f"No model found in {MODEL_DIR}.", FileNotFoundError)
-    if figi != PRIMARY_FIGI or timeframe != PRIMARY_TF:
-        return fail("No model for this instrument/timeframe.", RuntimeError)
     booster, meta = loaded
+    model_tf = meta.get("primary_tf", PRIMARY_TF)
+    if figi != PRIMARY_FIGI or timeframe != model_tf:
+        return fail("No model for this instrument/timeframe.", RuntimeError)
 
     all_candles = load_all_candles(from_dt, to_dt, primary=candles)
     features = build_features(all_candles)
