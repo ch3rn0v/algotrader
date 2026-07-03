@@ -65,14 +65,18 @@ def main():
     # 2. Candles and model predictions
     print("\nLoading candles and building predictions...")
     primary = get_candles(PRIMARY_FIGI, PRIMARY_TF, FROM, TO)
-    predictions, meta = build_predictions(primary, PRIMARY_FIGI, PRIMARY_TF, FROM, TO, required=True)
-    train_end_ts = pd.Timestamp(meta["train_end_ts"])
-    print(f"Train cutoff: {train_end_ts}")
+    predictions, meta = build_predictions(primary, PRIMARY_FIGI, PRIMARY_TF, FROM, TO)
 
-    # 3. Backtest on the test period only
-    test_mask = primary["timestamp"] > train_end_ts
-    bt_candles = primary[test_mask].reset_index(drop=True)
-    bt_predictions = predictions[test_mask.to_numpy()]
+    # 3. Backtest on the test period only (or the full range if there's no model)
+    if predictions is not None:
+        train_end_ts = pd.Timestamp(meta["train_end_ts"])
+        print(f"Train cutoff: {train_end_ts}")
+        test_mask = primary["timestamp"] > train_end_ts
+        bt_candles = primary[test_mask].reset_index(drop=True)
+        bt_predictions = predictions[test_mask.to_numpy()]
+    else:
+        bt_candles = primary
+        bt_predictions = None
 
     if len(bt_candles) == 0:
         raise RuntimeError("Test period is empty. Check train_end_ts in model metadata.")
