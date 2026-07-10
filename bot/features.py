@@ -10,6 +10,7 @@ import pandas as pd
 from config import PRIMARY_ASSET, PRIMARY_TF
 
 TF_DURATIONS = {
+    "1min": pd.Timedelta(minutes=1),
     "5min": pd.Timedelta(minutes=5),
     "15min": pd.Timedelta(minutes=15),
     "30min": pd.Timedelta(minutes=30),
@@ -107,10 +108,17 @@ def _cross_features(result: pd.DataFrame, prefixes: list[str], primary_prefix: s
     return result
 
 
-def build_features(all_candles: dict) -> pd.DataFrame:
-    """Merge features from all (asset, timeframe) pairs onto the primary 5m index.
+def build_features(
+    all_candles: dict,
+    primary_asset: str = PRIMARY_ASSET,
+    primary_tf: str = PRIMARY_TF,
+) -> pd.DataFrame:
+    """Merge features from all (asset, timeframe) pairs onto the primary index.
 
-    Primary series (SBERP 5m): feature values are shifted by one bar so that at
+    `primary_asset`/`primary_tf` default to the config values; pass a trained
+    model's own primary when building features for it.
+
+    Primary series: feature values are shifted by one bar so that at
     decision time (start of bar t) only bar t-1 data is visible. Target is close[t]/close[t-1].
 
     All other series: merged on bar END timestamp (start + duration). This ensures
@@ -120,7 +128,7 @@ def build_features(all_candles: dict) -> pd.DataFrame:
     The result has exactly one primary `timestamp` column. Each non-primary series
     also contributes a `{prefix}_ts` column recording which source bar was matched.
     """
-    base = all_candles[(PRIMARY_ASSET, PRIMARY_TF)].sort_values("timestamp").reset_index(drop=True)
+    base = all_candles[(primary_asset, primary_tf)].sort_values("timestamp").reset_index(drop=True)
     result = base[["timestamp"]].copy()
     prefixes = []
 
@@ -130,7 +138,7 @@ def build_features(all_candles: dict) -> pd.DataFrame:
         df = candles.sort_values("timestamp").reset_index(drop=True)
         feats = _raw_features(df, prefix)
 
-        if asset == PRIMARY_ASSET and tf == PRIMARY_TF:
+        if asset == primary_asset and tf == primary_tf:
             # Target is close[t]/close[t-1], so features must only use bar t-1 data.
             # Shift feature values forward by one bar; timestamp stays as the merge key.
             feat_cols = [c for c in feats.columns if c != "timestamp"]
@@ -145,7 +153,7 @@ def build_features(all_candles: dict) -> pd.DataFrame:
             feats_merge.loc[:, "timestamp"] = feats["timestamp"] + TF_DURATIONS[tf]
             result = pd.merge_asof(result, feats_merge, on="timestamp", direction="backward")
 
-    primary_prefix = f"{PRIMARY_ASSET}_{PRIMARY_TF.replace('min', 'm')}"
+    primary_prefix = f"{primary_asset}_{primary_tf.replace('min', 'm')}"
     result = _cross_features(result, prefixes, primary_prefix)
 
     return result

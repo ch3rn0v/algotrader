@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from candles import load_all_candles
-from config import MODEL_DIR, PRIMARY_FIGI, PRIMARY_TF
+from config import MODEL_DIR, PRIMARY_ASSET, PRIMARY_FIGI, PRIMARY_TF
 from feature_generator import apply_recipes
 from features import build_features
 
@@ -53,12 +53,20 @@ def build_predictions(
     if loaded is None:
         return fail(f"No model found in {MODEL_DIR}.", FileNotFoundError)
     booster, meta = loaded
+    model_asset = meta.get("primary_asset", PRIMARY_ASSET)
     model_tf = meta.get("primary_tf", PRIMARY_TF)
-    if figi != PRIMARY_FIGI or timeframe != model_tf:
+    model_figi = meta.get("assets", {}).get(model_asset, PRIMARY_FIGI)
+    if figi != model_figi or timeframe != model_tf:
         return fail("No model for this instrument/timeframe.", RuntimeError)
 
-    all_candles = load_all_candles(from_dt, to_dt, primary=candles)
-    features = build_features(all_candles)
+    # Load exactly the (asset, timeframe) universe the model was trained on,
+    # which may differ from the current config.
+    all_candles = load_all_candles(
+        from_dt, to_dt, primary=candles,
+        assets=meta.get("assets"), timeframes=meta.get("timeframes"),
+        primary_key=(model_asset, model_tf),
+    )
+    features = build_features(all_candles, primary_asset=model_asset, primary_tf=model_tf)
     features = features.drop(columns=[c for c in features.columns if features[c].isna().all()])
     features = apply_recipes(features, meta.get("gen_recipes", []))
 

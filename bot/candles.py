@@ -115,16 +115,28 @@ def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
     return cached[mask].reset_index(drop=True)
 
 
-def load_all_candles(from_dt, to_dt, primary: pd.DataFrame | None = None) -> dict:
-    """Load candles for every configured (asset, timeframe) pair.
+def load_all_candles(
+    from_dt,
+    to_dt,
+    primary: pd.DataFrame | None = None,
+    assets: dict | None = None,
+    timeframes: list | None = None,
+    primary_key: tuple | None = None,
+) -> dict:
+    """Load candles for every (asset, timeframe) pair.
 
     Returns {(asset, timeframe): DataFrame}. If `primary` is given, it is used
-    as-is for (PRIMARY_ASSET, PRIMARY_TF) instead of being loaded again.
+    as-is for `primary_key` instead of being loaded again. `assets`,
+    `timeframes` and `primary_key` default to the config values; pass a
+    model's own lists when building features for an already-trained model.
     """
+    assets = assets if assets is not None else ASSETS
+    timeframes = timeframes if timeframes is not None else TIMEFRAMES
+    primary_asset, primary_tf = primary_key if primary_key is not None else (PRIMARY_ASSET, PRIMARY_TF)
     all_candles = {}
-    for asset, figi in ASSETS.items():
-        for tf in TIMEFRAMES:
-            if primary is not None and asset == PRIMARY_ASSET and tf == PRIMARY_TF:
+    for asset, figi in assets.items():
+        for tf in timeframes:
+            if primary is not None and asset == primary_asset and tf == primary_tf:
                 all_candles[(asset, tf)] = primary
             else:
                 all_candles[(asset, tf)] = get_candles(figi, tf, from_dt, to_dt)
