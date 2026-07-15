@@ -1,26 +1,35 @@
-"""Minimal z-score mean reversion for SBERP 1min, gated by the 5min model.
+"""Minimal z-score mean reversion for SBERP 1min, tilted by the model.
 
-Two tunable parameters, everything else is fixed by design:
-  alpha   - one EWM alpha for both the trend (ewm mean of close) and the
-            deviation scale (ewm std of close).
-  z_entry - entry threshold in EWM standard deviations.
+Tunable parameters:
+  alpha         - one EWM alpha for both the trend (ewm mean of close) and
+                  the deviation scale (ewm std of close).
+  z_entry       - entry threshold in EWM standard deviations.
+  max_hold_bars - time stop: exit after holding this many bars. Per-trade
+                  analysis shows fast reversions win (<=~40 bars, ~85% win
+                  rate) while long holds are trends in disguise.
+  pred_gain     - scale of the model tilt on entries (0 disables it).
 
 Logic:
   - z = (close - ewm_mean) / ewm_std: how far price has strayed from the
     trend, in units of recent volatility. Being volatility-scaled, one
     threshold works across calm and busy regimes with no extra filters.
-  - Enter against the deviation when |z| >= z_entry AND the model agrees:
-    pred > 1 for longs, pred < 1 for shorts. The 5min model's prediction is
-    mapped onto every 1min bar of its 5min block (merge_asof backward), so a
-    decision only ever sees a prediction computed from already-closed bars.
-  - Exit when z crosses 0 (price is back at the trend), at session end, and
-    always at the last bar of the day.
+  - Model tilt: the model predicts the current primary-TF bar's return;
+    (pred - 1) * close / sigma expresses that expected move in z units and
+    shifts the measured deviation: z_eff = z - pred_gain * pred_z. An
+    expected up-move makes longs easier and shorts harder to enter, instead
+    of the old binary pred-direction gate. Predictions are mapped onto every
+    1min bar of their primary-TF block (merge_asof backward), so a decision
+    only ever sees a prediction computed from already-closed bars.
+  - Enter against the deviation when z_eff <= -z_entry (long) or
+    z_eff >= z_entry (short).
+  - Exit when z crosses 0 (price is back at the trend), after max_hold_bars,
+    at session end, and always at the last bar of the day.
   - Trade only the main MOEX session, 10:00-18:45 MSK = 07:00-15:45 UTC.
   - Decision uses the previous completed bar; fill at the current bar's open.
 
 Usage:
-    python3 backtest_mean_rev_z.py                 # config dates, model-gated
-    python3 backtest_mean_rev_z.py --alpha 0.05 --z-entry 2.5
+    python3 backtest_mean_rev_z.py                 # config dates, latest model
+    python3 backtest_mean_rev_z.py --alpha 0.05 --z-entry 2.5 --max-hold 45
 """
 
 import argparse
@@ -31,7 +40,7 @@ import pandas as pd
 
 from candles import get_candles
 from config import FROM, OUTPUT_DIR, PRIMARY_ASSET, PRIMARY_FIGI, TO
-from model import build_predictions
+from model import build_predictions, load_latest_model
 
 # Main MOEX session in UTC minutes-of-day (10:00-18:45 MSK, MSK = UTC+3).
 _SESSION_START_MIN = 7 * 60
@@ -42,6 +51,8 @@ def run_backtest(
     candles: pd.DataFrame,
     alpha: float = 0.02,
     z_entry: float = 2.0,
+    max_hold_bars: int | None = 45,
+    pred_gain: float = 1.0,
     predictions: np.ndarray | None = None,
     position_size: int = 1,
     initial_cash: float = 100_000.0,
@@ -54,6 +65,7 @@ def run_backtest(
     trend = df["close"].ewm(alpha=alpha).mean()
     sigma = df["close"].ewm(alpha=alpha).std()
     z = ((df["close"] - trend) / sigma).to_numpy()
+    sigma_a = sigma.to_numpy()
 
     ts_dt = pd.to_datetime(df["timestamp"])
     minute = (ts_dt.dt.hour * 60 + ts_dt.dt.minute).to_numpy()
@@ -77,6 +89,7 @@ def run_backtest(
     position = 0
     cash = float(initial_cash)
     desired = 0
+    entry_bar = 0
     peak_exposure = 0.0
     total_fees = 0.0
     trade_rows = []
@@ -92,15 +105,16 @@ def run_backtest(
                 desired = 0
             elif position != 0:
                 back_at_trend = (position > 0 and z[p] >= 0) or (position < 0 and z[p] <= 0)
-                desired = 0 if back_at_trend else position
+                time_stop = max_hold_bars is not None and i - entry_bar >= max_hold_bars
+                desired = 0 if back_at_trend or time_stop else position
             elif session_a[p]:
-                if predictions is not None:
-                    pred = float(predictions[i])
-                    want_long = z[p] <= -z_entry and pred > 1.0
-                    want_short = z[p] >= z_entry and pred < 1.0
-                else:
-                    want_long = z[p] <= -z_entry
-                    want_short = z[p] >= z_entry
+                # Model tilt: expected move of the current primary-TF bar,
+                # expressed in z units, shifts the measured deviation.
+                z_eff = z[p]
+                if predictions is not None and sigma_a[p] > 0:
+                    z_eff -= pred_gain * (float(predictions[i]) - 1.0) * closes[p] / sigma_a[p]
+                want_long = z_eff <= -z_entry
+                want_short = z_eff >= z_entry
                 desired = position_size if want_long else -position_size if want_short else 0
             else:
                 desired = 0
@@ -112,6 +126,8 @@ def run_backtest(
             fee = notional * fee_rate
             total_fees += fee
             cash -= delta * opens[i] + fee
+            if position == 0:
+                entry_bar = i
             position += delta
             peak_exposure = max(peak_exposure, abs(position) * opens[i])
             trade_rows.append({"timestamp": timestamps[i], "qty": delta, "price": opens[i], "fee": fee})
@@ -175,26 +191,34 @@ def run_backtest(
 
 
 def predictions_for_1min(candles_1m: pd.DataFrame, from_dt, to_dt) -> tuple[np.ndarray | None, dict | None]:
-    """Map the 5min model's predictions onto 1min bars.
+    """Map the latest model's predictions onto 1min bars.
 
-    Builds predictions on the 5min series, then assigns each 1min bar the
-    prediction of the 5min block it falls into (merge_asof backward). That
-    prediction was computed from bars completed before the block started, so
-    using it anywhere inside the block adds no lookahead.
+    Reads the model's own timeframe from its meta, builds predictions on that
+    series, then assigns each 1min bar the prediction of the primary-TF block
+    it falls into (merge_asof backward). That prediction was computed from
+    bars completed before the block started, so using it anywhere inside the
+    block adds no lookahead.
     """
-    df5 = get_candles(PRIMARY_FIGI, "5min", from_dt, to_dt)
-    preds5, meta = build_predictions(df5, PRIMARY_FIGI, "5min", from_dt, to_dt, fill=1.0)
-    if preds5 is None:
+    loaded = load_latest_model()
+    if loaded is None:
+        print("No model found. Running without predictions.")
         return None, None
-    pred5_df = pd.DataFrame({"timestamp": df5["timestamp"], "pred": preds5})
-    merged = pd.merge_asof(candles_1m[["timestamp"]], pred5_df, on="timestamp", direction="backward")
+    model_tf = loaded[1].get("primary_tf", "5min")
+    df_m = get_candles(PRIMARY_FIGI, model_tf, from_dt, to_dt)
+    preds_m, meta = build_predictions(df_m, PRIMARY_FIGI, model_tf, from_dt, to_dt, fill=1.0)
+    if preds_m is None:
+        return None, None
+    pred_df = pd.DataFrame({"timestamp": df_m["timestamp"], "pred": preds_m})
+    merged = pd.merge_asof(candles_1m[["timestamp"]], pred_df, on="timestamp", direction="backward")
     return merged["pred"].fillna(1.0).to_numpy(), meta
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Z-score mean reversion backtest (1min, model-gated)")
-    parser.add_argument("--alpha",   type=float, default=0.02)
-    parser.add_argument("--z-entry", type=float, default=2.0)
+    parser = argparse.ArgumentParser(description="Z-score mean reversion backtest (1min, model-tilted)")
+    parser.add_argument("--alpha",     type=float, default=0.02)
+    parser.add_argument("--z-entry",   type=float, default=2.0)
+    parser.add_argument("--max-hold",  type=int,   default=45, help="time stop in bars (0 = off)")
+    parser.add_argument("--pred-gain", type=float, default=1.0, help="model tilt scale (0 = ignore model)")
     parser.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="Start date YYYY-MM-DD (default: config FROM)")
     parser.add_argument("--to",   dest="date_to",   default=None, metavar="DATE", help="End date YYYY-MM-DD (default: config TO)")
     args = parser.parse_args()
@@ -215,13 +239,17 @@ def main():
         candles = candles.loc[test_mask].reset_index(drop=True)
         predictions = predictions[test_mask]
 
+    max_hold = args.max_hold if args.max_hold > 0 else None
     stats = run_backtest(candles, alpha=args.alpha, z_entry=args.z_entry,
+                         max_hold_bars=max_hold, pred_gain=args.pred_gain,
                          predictions=predictions, headless=True)
-    print(f"\nalpha={args.alpha}  z_entry={args.z_entry}")
+    print(f"\nalpha={args.alpha}  z_entry={args.z_entry}  max_hold={args.max_hold}  pred_gain={args.pred_gain}")
     for k, v in stats.items():
         print(f"  {k}: {v}")
 
-    result = run_backtest(candles, alpha=args.alpha, z_entry=args.z_entry, predictions=predictions)
+    result = run_backtest(candles, alpha=args.alpha, z_entry=args.z_entry,
+                          max_hold_bars=max_hold, pred_gain=args.pred_gain,
+                          predictions=predictions)
     from charts import plot_results  # matplotlib import is slow; keep it off the headless path
 
     ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")

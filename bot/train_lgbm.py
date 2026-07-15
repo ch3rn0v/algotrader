@@ -1,4 +1,4 @@
-"""Train a LightGBM model to predict the current 5-min bar's return for SBERP.
+"""Train a LightGBM model to predict the current primary-bar return for SBERP.
 
 Pipeline:
   1. base features for all (asset, timeframe) pairs (features.py)
@@ -7,11 +7,12 @@ Pipeline:
   4. optuna hyperparameter tuning on a train/validation split (tuner.py)
   5. final fit on the full train set, evaluation on the held-out test set
 
-Target: close[t] / close[t-1] — return of the current 5-min bar.
+Target: close[t] / close[t-1] — return of the current primary bar (--tf).
 Metric: Pearson correlation between predicted and actual return.
 
 Usage (from repo root, with venv activated):
-    python3 bot/train_lgbm.py                     # full pipeline, defaults
+    python3 bot/train_lgbm.py                     # full pipeline, config defaults
+    python3 bot/train_lgbm.py --tf 15min --timeframes 5min,15min,30min,1h
     python3 bot/train_lgbm.py --gen-iterations 0  # skip feature generation
     python3 bot/train_lgbm.py --trials 0          # skip tuning, use default params
 """
@@ -19,7 +20,7 @@ Usage (from repo root, with venv activated):
 import argparse
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import lightgbm as lgbm
 import numpy as np
@@ -47,7 +48,12 @@ DEFAULT_LGBM_PARAMS = {
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train the SBERP 5m return model")
+    p = argparse.ArgumentParser(description="Train the SBERP return model")
+    p.add_argument("--tf", default=PRIMARY_TF, help=f"primary timeframe to train on (default {PRIMARY_TF})")
+    p.add_argument("--timeframes", default=",".join(TIMEFRAMES),
+                   help="comma-separated timeframes to build features from (default: config TIMEFRAMES)")
+    p.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="start date YYYY-MM-DD (default: config FROM)")
+    p.add_argument("--to", dest="date_to", default=None, metavar="DATE", help="end date YYYY-MM-DD (default: config TO)")
     p.add_argument("--gen-iterations", type=int, default=2, help="feature generator iterations (0 = skip, default 2)")
     p.add_argument("--min-target-corr", type=float, default=0.02, help="generator: discard candidates below this |corr| with target (default 0.02)")
     p.add_argument("--gen-max-new", type=int, default=200, help="generator: max new features kept per iteration (default 200)")
@@ -59,15 +65,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+    tf = args.tf
+    tfs = args.timeframes.split(",")
+    from_dt = datetime.strptime(args.date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_from else FROM
+    to_dt = datetime.strptime(args.date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_to else TO
 
     # 1. Download / load candles (cache is handled by get_candles)
-    print(f"Loading {len(ASSETS) * len(TIMEFRAMES)} candle series...")
-    all_candles = load_all_candles(FROM, TO)
+    print(f"Loading {len(ASSETS) * len(tfs)} candle series...")
+    all_candles = load_all_candles(from_dt, to_dt, timeframes=tfs)
 
     # 2. Build feature matrix
     print("\nBuilding features...")
-    features = build_features(all_candles)
-    primary = all_candles[(PRIMARY_ASSET, PRIMARY_TF)].sort_values("timestamp").reset_index(drop=True)
+    features = build_features(all_candles, primary_tf=tf)
+    primary = all_candles[(PRIMARY_ASSET, tf)].sort_values("timestamp").reset_index(drop=True)
     features.loc[:, "target"] = (primary["close"] / primary["close"].shift(1)).values
 
     n_before = len(features)
@@ -186,11 +196,11 @@ def main():
     meta = {
         "timestamp": ts,
         "primary_asset": PRIMARY_ASSET,
-        "primary_tf": PRIMARY_TF,
+        "primary_tf": tf,
         "assets": ASSETS,
-        "timeframes": TIMEFRAMES,
-        "from": FROM.isoformat(),
-        "to": TO.isoformat(),
+        "timeframes": tfs,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
         "train_ratio": TRAIN_RATIO,
         "train_end_ts": str(features["timestamp"].iloc[split - 1]),
         "n_train": len(X_train),
