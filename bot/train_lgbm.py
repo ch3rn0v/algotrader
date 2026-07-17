@@ -2,10 +2,12 @@
 
 Pipeline:
   1. base features for all (asset, timeframe) pairs (features.py)
-  2. iterative pairwise feature generation, fit on train only (feature_generator.py)
-  3. greedy correlation-based feature selection on train only (feature_selector.py)
-  4. optuna hyperparameter tuning on a train/validation split (tuner.py)
-  5. final fit on the full train set, evaluation on the held-out test set
+  2. base-feature prefilter: drop features with |corr(train target)| below
+     --min-base-corr before any pairwise generation
+  3. iterative pairwise feature generation, fit on train only (feature_generator.py)
+  4. greedy correlation-based feature selection on train only (feature_selector.py)
+  5. optuna hyperparameter tuning on a train/validation split (tuner.py)
+  6. final fit on the full train set, evaluation on the held-out test set
 
 Target: close[t] / close[t-1] — return of the current primary bar (--tf).
 Metric: Pearson correlation between predicted and actual return.
@@ -54,6 +56,8 @@ def parse_args():
                    help="comma-separated timeframes to build features from (default: config TIMEFRAMES)")
     p.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="start date YYYY-MM-DD (default: config FROM)")
     p.add_argument("--to", dest="date_to", default=None, metavar="DATE", help="end date YYYY-MM-DD (default: config TO)")
+    p.add_argument("--min-base-corr", type=float, default=0.05,
+                   help="drop base features with |corr(train target)| below this before generation (0 = keep all, default 0.05)")
     p.add_argument("--gen-iterations", type=int, default=2, help="feature generator iterations (0 = skip, default 2)")
     p.add_argument("--min-target-corr", type=float, default=0.02, help="generator: discard candidates below this |corr| with target (default 0.02)")
     p.add_argument("--gen-max-new", type=int, default=200, help="generator: max new features kept per iteration (default 200)")
@@ -117,7 +121,26 @@ def main():
     print(f"\nTrain: {split} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
     print(f"Test:  {len(features) - split} rows  ({features['timestamp'].iloc[split]} → {features['timestamp'].iloc[-1]})")
 
-    # 4. Feature generation — fit on train rows only, then applied to all rows.
+    # 4. Base-feature prefilter — train rows only. Drops unpromising features
+    # before the (quadratic) pairwise generator sees them.
+    n_base_total = len(base_cols)
+    if args.min_base_corr > 0:
+        mat = features[base_cols].iloc[:split].to_numpy(dtype=float)
+        mat = mat - mat.mean(axis=0)
+        yc = y_train - y_train.mean()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            corr = np.abs(mat.T @ yc) / (mat.std(axis=0) * yc.std() * split)
+        corr[~np.isfinite(corr)] = 0.0  # zero-variance columns
+        base_cols = [c for c, v in zip(base_cols, corr) if v >= args.min_base_corr]
+        print(f"\nBase-feature filter: kept {len(base_cols)} / {n_base_total} "
+              f"with |corr| >= {args.min_base_corr}")
+        if not base_cols:
+            raise RuntimeError(
+                f"No base feature passes |corr| >= {args.min_base_corr}; "
+                f"lower --min-base-corr."
+            )
+
+    # 5. Feature generation — fit on train rows only, then applied to all rows.
     recipes = []
     if args.gen_iterations > 0:
         print("\nGenerating features (train data only)...")
@@ -135,7 +158,7 @@ def main():
 
     all_cols = base_cols + [r["name"] for r in recipes]
 
-    # 5. Feature selection — train rows only.
+    # 6. Feature selection — train rows only.
     print("\nSelecting features (train data only)...")
     feature_cols = select_features(
         features.iloc[:split],
@@ -148,21 +171,21 @@ def main():
     X = features[feature_cols]
     X_train, X_test = X.iloc[:split], X.iloc[split:]
 
-    # 6. Hyperparameter tuning on a temporal train/validation split.
+    # 7. Hyperparameter tuning on a temporal train/validation split.
     if args.trials > 0:
         print("\nTuning hyperparameters...")
         lgbm_params = tune(X_train, y_train, n_trials=args.trials)
     else:
         lgbm_params = dict(DEFAULT_LGBM_PARAMS)
 
-    # 7. Final fit on the full train set.
+    # 8. Final fit on the full train set.
     print(f"\nTraining LightGBM ({lgbm_params['n_estimators']} trees, max_depth={lgbm_params['max_depth']})...")
     t0 = time.time()
     model = lgbm.LGBMRegressor(**lgbm_params)
     model.fit(X_train, y_train)
     train_time = time.time() - t0
 
-    # 8. Evaluate
+    # 9. Evaluate
     pred_train = model.predict(X_train)
     pred_test = model.predict(X_test)
     corr_train = float(np.corrcoef(y_train, pred_train)[0, 1])
@@ -171,7 +194,7 @@ def main():
     print(f"Corr (train):   {corr_train:.4f}")
     print(f"Corr (test):    {corr_test:.4f}")
 
-    # 9. Save model
+    # 10. Save model
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_path = MODEL_DIR / f"lgbm_{ts}.txt"
@@ -205,7 +228,9 @@ def main():
         "train_end_ts": str(features["timestamp"].iloc[split - 1]),
         "n_train": len(X_train),
         "n_test": len(X_test),
-        "n_base_features": len(base_cols),
+        "n_base_features": n_base_total,
+        "min_base_corr": args.min_base_corr,
+        "n_base_kept": len(base_cols),
         "gen_iterations": args.gen_iterations,
         "gen_recipes": recipes,
         "feature_cols": feature_cols,
