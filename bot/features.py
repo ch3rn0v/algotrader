@@ -140,11 +140,31 @@ def _raw_features(df: pd.DataFrame, prefix: str, extended: bool = False) -> pd.D
     putx("ch", c / h - 1, price_new)
     putx("cl", c / l - 1, price_new)
 
-    # Volume-weighted EWM close (VWAP-like), normalized by the latest close.
+    # Volume-weighted EWM close/high/low (VWAP-like), normalized by the
+    # latest close, plus the volume-weighted high-low spread.
     for a in EWM_ALPHAS:
-        wsum = (c * v).ewm(alpha=a, adjust=False).mean()
-        wnorm = v.ewm(alpha=a, adjust=False).mean()
-        putx(f"vwap_{_alpha_tag(a)}", wsum / wnorm.where(wnorm > 0) / c - 1, price_new)
+        t = _alpha_tag(a)
+        wnorm = v.ewm(alpha=a, adjust=False).mean().where(lambda s: s > 0)
+        wc = (c * v).ewm(alpha=a, adjust=False).mean() / wnorm
+        wh = (h * v).ewm(alpha=a, adjust=False).mean() / wnorm
+        wl = (l * v).ewm(alpha=a, adjust=False).mean() / wnorm
+        putx(f"vwap_{t}", wc / c - 1, price_new)
+        putx(f"vwh_{t}", wh / c - 1, price_new)
+        putx(f"vwl_{t}", wl / c - 1, price_new)
+        putx(f"vwhl_{t}", (wh - wl) / c, price_new)
+
+    # EWM path efficiency: smoothed signed drift over smoothed absolute
+    # per-bar movement. |1| = straight-line move, ~0 = choppy churn. This is
+    # the EWM analog of net-change-over-path-length (inverted vs the raw
+    # path/net ratio, which blows up when the net move is ~0). The v-weighted
+    # variant emphasizes movement that happened on real volume.
+    dc = c.diff()
+    for a in EWM_ALPHAS:
+        t = _alpha_tag(a)
+        path = dc.abs().ewm(alpha=a, adjust=False).mean()
+        putx(f"eff_{t}", dc.ewm(alpha=a, adjust=False).mean() / path.where(path > 0), price_new)
+        pathv = (dc.abs() * v).ewm(alpha=a, adjust=False).mean()
+        putx(f"effv_{t}", (dc * v).ewm(alpha=a, adjust=False).mean() / pathv.where(pathv > 0), price_new)
 
     # N-bar close differences (close - close[t-N]), raw and EWM-smoothed,
     # close-normalized. Raw cd1 is skipped: ret1 already covers it.
