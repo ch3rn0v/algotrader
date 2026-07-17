@@ -1,13 +1,25 @@
 """Feature engineering for the LightGBM model.
 
 Merges OHLCV-derived features from all (asset, timeframe) pairs onto the
-primary 5m index without lookahead (see build_features), then adds
+primary index without lookahead (see build_features), then adds
 cross-series features (trend agreement, market-wide volume anomalies).
+
+The primary series additionally gets an extended set (MACD spreads, intra-bar
+ratios, VWAP-like EWMs, N-bar diffs, lags, rolling slopes, EWM volume
+ratios); all EWMs there are alpha-parameterized over EWM_ALPHAS.
 """
+import itertools
+
 import numpy as np
 import pandas as pd
 
 from config import PRIMARY_ASSET, PRIMARY_TF
+
+# Extended-feature knobs (primary series only; see _extended_features).
+EWM_ALPHAS = (0.01, 0.05, 0.1, 0.5)
+SHIFT_LAGS = (1, 2, 4, 8, 16)
+DIFF_LAGS = (1, 2, 4)
+SLOPE_WINDOW = 10
 
 TF_DURATIONS = {
     "1min": pd.Timedelta(minutes=1),
@@ -27,7 +39,34 @@ def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
     return rsi.where((gain + loss) > 0, 50.0).where(gain.notna())
 
 
-def _raw_features(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
+def _alpha_tag(alpha: float) -> str:
+    # 0.01 -> a01, 0.05 -> a05, 0.1 -> a1, 0.5 -> a5
+    return f"a{str(alpha).replace('0.', '')}"
+
+
+def _rolling_slope(s: pd.Series, window: int = SLOPE_WINDOW) -> pd.Series:
+    """OLS slope of the last `window` values against 0..window-1 (per-bar units).
+    Windows containing NaN yield NaN."""
+    y = s.to_numpy(dtype=float)
+    out = np.full(len(y), np.nan)
+    if len(y) >= window:
+        x = np.arange(window, dtype=float)
+        x -= x.mean()
+        sw = np.lib.stride_tricks.sliding_window_view(y, window)
+        out[window - 1:] = sw @ x / (x @ x)
+    return pd.Series(out, index=s.index)
+
+
+# Base features by group, used to extend shifts/slopes over the whole set.
+_PRICE_BASE = [
+    "ret1", "ret3", "ret8", "ret20", "spread", "body", "upper_wick",
+    "lower_wick", "body_frac", "close_pos", "dir", "gap", "trend",
+    "brk_hi20", "brk_lo20", "new_hi20", "new_lo20", "rsi14", "volat20",
+]
+_VOL_BASE = ["vol_norm", "vol_z", "vol_trend"]
+
+
+def _raw_features(df: pd.DataFrame, prefix: str, extended: bool = False) -> pd.DataFrame:
     """Compute per-bar features for one (asset, timeframe) candle DataFrame."""
     o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
     out = pd.DataFrame({"timestamp": df["timestamp"]})
@@ -77,7 +116,82 @@ def _raw_features(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
     vol_ma5 = v.rolling(5, min_periods=1).mean()
     put("vol_trend", vol_ma5 / vol_ma - 1)
 
-    return out
+    if not extended:
+        return out
+
+    # --- extended set (primary series only: the pairwise generator is
+    # quadratic in feature count, so this stays off for context series) ---
+    ext: dict[str, pd.Series] = {}
+    price_new: list[str] = []
+    vol_new: list[str] = []
+
+    def putx(name: str, values: pd.Series, group: list[str]) -> None:
+        ext[name] = values
+        group.append(name)
+
+    # MACD: normalized EMA spread for every fast>slow alpha pair.
+    emas = {a: c.ewm(alpha=a, adjust=False).mean() for a in EWM_ALPHAS}
+    for fast, slow in itertools.combinations(sorted(EWM_ALPHAS, reverse=True), 2):
+        putx(f"macd_{_alpha_tag(fast)}_{_alpha_tag(slow)}", (emas[fast] - emas[slow]) / c, price_new)
+
+    # Intra-bar price ratios.
+    putx("hl", h / l - 1, price_new)
+    putx("co", c / o - 1, price_new)
+    putx("ch", c / h - 1, price_new)
+    putx("cl", c / l - 1, price_new)
+
+    # Volume-weighted EWM close (VWAP-like), normalized by the latest close.
+    for a in EWM_ALPHAS:
+        wsum = (c * v).ewm(alpha=a, adjust=False).mean()
+        wnorm = v.ewm(alpha=a, adjust=False).mean()
+        putx(f"vwap_{_alpha_tag(a)}", wsum / wnorm.where(wnorm > 0) / c - 1, price_new)
+
+    # N-bar close differences (close - close[t-N]), raw and EWM-smoothed,
+    # close-normalized. Raw cd1 is skipped: ret1 already covers it.
+    for n in DIFF_LAGS:
+        d = c.diff(n)
+        if n > 1:
+            putx(f"cd{n}", d / c, price_new)
+        for a in EWM_ALPHAS:
+            putx(f"cd{n}_ewm_{_alpha_tag(a)}", d.ewm(alpha=a, adjust=False).mean() / c, price_new)
+
+    # Volume levels and N-th order differences. Zero-volume bars would blow up
+    # the ratios, so the normalizer is the latest positive volume.
+    v_ref = v.where(v > 0).ffill()
+    for a in EWM_ALPHAS:
+        t = _alpha_tag(a)
+        vm = v.ewm(alpha=a, adjust=False).mean()
+        # pandas only implements ewm sum with adjust=True (sum of (1-a)^i * x).
+        vs = v.ewm(alpha=a, adjust=True).sum()
+        putx(f"vm_{t}", vm / v_ref, vol_new)
+        putx(f"v_over_vm_{t}", v / vm.where(vm > 0), vol_new)
+        putx(f"vsum_{t}", vs / v_ref, vol_new)
+        putx(f"v_over_vsum_{t}", v / vs.where(vs > 0), vol_new)
+    for n in DIFF_LAGS:
+        d = v.diff(n)
+        putx(f"vd{n}", d / v_ref, vol_new)
+        for a in EWM_ALPHAS:
+            putx(f"vd{n}_ewm_{_alpha_tag(a)}", d.ewm(alpha=a, adjust=False).mean() / v_ref, vol_new)
+
+    def series_of(name: str) -> pd.Series:
+        return ext[name] if name in ext else out[f"{prefix}_{name}"]
+
+    price_all = _PRICE_BASE + price_new
+    vol_all = _VOL_BASE + vol_new
+
+    # Lags of every price feature; slopes of every price and volume feature.
+    # Slopes/lags of base (unshifted) series only: slope∘shift == shift∘slope.
+    for name in price_all:
+        s = series_of(name)
+        for lag in SHIFT_LAGS:
+            ext[f"{name}_lag{lag}"] = s.shift(lag)
+    for name in price_all + vol_all:
+        ext[f"{name}_slope{SLOPE_WINDOW}"] = _rolling_slope(series_of(name))
+
+    return pd.concat(
+        [out, pd.DataFrame({f"{prefix}_{k}": s for k, s in ext.items()}, index=out.index)],
+        axis=1,
+    )
 
 
 def _cross_features(result: pd.DataFrame, prefixes: list[str], primary_prefix: str) -> pd.DataFrame:
@@ -85,27 +199,28 @@ def _cross_features(result: pd.DataFrame, prefixes: list[str], primary_prefix: s
     already lookahead-free after the merge."""
     assets = sorted({p.rsplit("_", 1)[0] for p in prefixes})
     tfs = sorted({p.rsplit("_", 1)[1] for p in prefixes})
+    cross: dict[str, pd.Series] = {}
 
     # Trend/direction agreement of each series with the primary series.
     prim_trend = np.sign(result[f"{primary_prefix}_trend"])
     for p in prefixes:
         if p == primary_prefix:
             continue
-        result.loc[:, f"x_{p}_trend_match"] = prim_trend * np.sign(result[f"{p}_trend"])
+        cross[f"x_{p}_trend_match"] = prim_trend * np.sign(result[f"{p}_trend"])
 
     # Market-wide unusual volume: mean vol_z across assets at each timeframe.
     for tf in tfs:
         cols = [f"{a}_{tf}_vol_z" for a in assets if f"{a}_{tf}_vol_z" in result.columns]
         if len(cols) > 1:
-            result.loc[:, f"x_volz_mkt_{tf}"] = result[cols].mean(axis=1)
+            cross[f"x_volz_mkt_{tf}"] = result[cols].mean(axis=1)
 
     # Per-asset unusual volume agreement across timeframes.
     for a in assets:
         cols = [f"{a}_{tf}_vol_z" for tf in tfs if f"{a}_{tf}_vol_z" in result.columns]
         if len(cols) > 1:
-            result.loc[:, f"x_volz_{a}_tfs"] = result[cols].mean(axis=1)
+            cross[f"x_volz_{a}_tfs"] = result[cols].mean(axis=1)
 
-    return result
+    return pd.concat([result, pd.DataFrame(cross, index=result.index)], axis=1)
 
 
 def build_features(
@@ -136,7 +251,8 @@ def build_features(
         prefix = f"{asset}_{tf.replace('min', 'm')}"
         prefixes.append(prefix)
         df = candles.sort_values("timestamp").reset_index(drop=True)
-        feats = _raw_features(df, prefix)
+        is_primary = asset == primary_asset and tf == primary_tf
+        feats = _raw_features(df, prefix, extended=is_primary)
 
         if asset == primary_asset and tf == primary_tf:
             # Target is close[t]/close[t-1], so features must only use bar t-1 data.
