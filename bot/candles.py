@@ -34,6 +34,9 @@ _RETRY_DELAYS = {
     "UNAVAILABLE":        [2, 5, 15, 30],
 }
 
+_STREAM_LOG_EVERY = 5000    # log fetch progress every N candles
+_CHECKPOINT_EVERY = 20000   # persist partial fetch to disk every N candles
+
 
 def _utc(x) -> pd.Timestamp:
     t = pd.Timestamp(x)
@@ -44,49 +47,100 @@ def _q(q) -> float:
     return q.units + q.nano / 1e9
 
 
-def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp) -> pd.DataFrame:
+def _merge_candles(base: pd.DataFrame, rows: list[dict]) -> pd.DataFrame:
+    """Combine cached candles with freshly fetched rows, de-duplicated on
+    timestamp and sorted. Safe when either side is empty."""
+    add = pd.DataFrame(rows)
+    if base.empty:
+        combined = add
+    elif add.empty:
+        combined = base
+    else:
+        combined = pd.concat([base, add], ignore_index=True)
+    return combined.drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
+
+
+def _save_atomic(df: pd.DataFrame, path) -> None:
+    """Write via a temp file + rename so an interrupted write can't corrupt
+    the cache (rename is atomic on the same filesystem)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp,
+           on_chunk=None) -> pd.DataFrame:
+    """Fetch candles, streaming and accumulating rows.
+
+    get_all_candles pages through the API lazily; a multi-year range is many
+    sequential requests, so we stream and log progress instead of blocking
+    silently on list(...). Rows accumulate ACROSS retries and a transient
+    error resumes from the last candle received, so a long fetch survives
+    intermittent API failures instead of restarting each time.
+
+    on_chunk(rows), if given, is called every _CHECKPOINT_EVERY candles so the
+    caller can persist partial progress to disk. Only pass it when the fetched
+    range extends the cache forward (or the cache is empty); checkpointing a
+    backward-fill would leave a hole the min/max gap detection can't see.
+    """
     retry_counts = {status: 0 for status in _RETRY_DELAYS}
+    rows: list[dict] = []
+    cur_from = from_ts
+    progress_at_last_error = 0
+    print(f"    fetching {figi} {timeframe} {from_ts.date()}..{to_ts.date()} "
+          f"from API...", flush=True)
     while True:
         try:
-            # get_all_candles pages through the API lazily; a multi-year range
-            # is many sequential requests, so stream and log progress instead
-            # of blocking silently on list(...).
-            print(f"    fetching {figi} {timeframe} {from_ts.date()}..{to_ts.date()} "
-                  f"from API...", flush=True)
-            rows = []
             with Client(os.environ["TBANK_TOKEN"]) as client:
                 for c in client.get_all_candles(
                     instrument_id=figi,
-                    from_=from_ts.to_pydatetime(),
+                    from_=cur_from.to_pydatetime(),
                     to=to_ts.to_pydatetime(),
                     interval=_INTERVALS[timeframe],
                 ):
+                    ts = _utc(c.time)
+                    # from_ is inclusive, so a resumed stream re-sends the last
+                    # candle; skip anything we already have.
+                    if rows and ts <= rows[-1]["timestamp"]:
+                        continue
                     rows.append({
-                        "timestamp": _utc(c.time),
+                        "timestamp": ts,
                         "open":  _q(c.open),
                         "high":  _q(c.high),
                         "low":   _q(c.low),
                         "close": _q(c.close),
                         "volume": c.volume,
                     })
-                    if len(rows) % 5000 == 0:
+                    if len(rows) % _STREAM_LOG_EVERY == 0:
                         print(f"      ...{len(rows)} candles so far "
                               f"(through {rows[-1]['timestamp'].date()})", flush=True)
+                    if on_chunk is not None and len(rows) % _CHECKPOINT_EVERY == 0:
+                        on_chunk(rows)
+                        print(f"      checkpointed {len(rows)} candles to cache", flush=True)
             print(f"    done: {len(rows)} candles for {figi} {timeframe}", flush=True)
             return pd.DataFrame(rows)
         except RequestError as e:
             err = str(e)
+            # Resume from the last candle received; reset the retry budget if we
+            # made progress since the previous error (budget is per-stall).
+            if rows:
+                cur_from = rows[-1]["timestamp"]
+                if len(rows) > progress_at_last_error:
+                    retry_counts = {status: 0 for status in _RETRY_DELAYS}
+                progress_at_last_error = len(rows)
             for status, delays in _RETRY_DELAYS.items():
                 if status in err:
                     n = retry_counts[status]
                     if n < len(delays):
                         retry_counts[status] += 1
                         print(f"  {status} — retrying in {delays[n]}s "
-                              f"(attempt {n + 1}/{len(delays)})...", flush=True)
+                              f"(attempt {n + 1}/{len(delays)}, resuming from "
+                              f"{cur_from.date()}, {len(rows)} candles so far)...", flush=True)
                         time.sleep(delays[n])
                         break
                     raise RuntimeError(
-                        f"{status} fetching {figi} {timeframe}: gave up after {len(delays)} retries"
+                        f"{status} fetching {figi} {timeframe}: gave up after {len(delays)} "
+                        f"retries ({len(rows)} candles fetched before giving up)"
                     ) from e
             else:
                 raise RuntimeError(
@@ -106,14 +160,19 @@ def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
     else:
         cached = pd.DataFrame()
 
-    to_fetch = []
+    # Each gap carries a `checkpointable` flag: True only when the fetch
+    # extends the cache forward (or the cache is empty), so partial saves stay
+    # contiguous. A backward-fill can't be checkpointed mid-stream — a partial
+    # save would leave a hole between it and the old cache start that the
+    # min/max gap detection here would never notice.
+    to_fetch = []  # (start, end, checkpointable)
     if cached.empty:
-        to_fetch.append((from_ts, to_ts))
+        to_fetch.append((from_ts, to_ts, True))
     else:
         if from_ts < cached["timestamp"].min():
-            to_fetch.append((from_ts, cached["timestamp"].min()))
+            to_fetch.append((from_ts, cached["timestamp"].min(), False))
         if to_ts > cached["timestamp"].max():
-            to_fetch.append((cached["timestamp"].max(), to_ts))
+            to_fetch.append((cached["timestamp"].max(), to_ts, True))
 
     if to_fetch:
         if cached.empty:
@@ -121,14 +180,18 @@ def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
         else:
             print(f"  {figi} {timeframe}: cache covers "
                   f"{cached['timestamp'].min().date()}..{cached['timestamp'].max().date()}", flush=True)
-        for s, e in to_fetch:
+        for s, e, _ in to_fetch:
             print(f"    gap to fetch: {s.date()}..{e.date()}", flush=True)
-        fetched = pd.concat([_fetch(figi, timeframe, s, e) for s, e in to_fetch], ignore_index=True)
-        cached = (pd.concat([cached, fetched], ignore_index=True)
-                  .drop_duplicates("timestamp")
-                  .sort_values("timestamp")
-                  .reset_index(drop=True))
-        cached.to_csv(path, index=False)
+
+        # Fetch and persist gap-by-gap so an interruption keeps what arrived.
+        for s, e, checkpointable in to_fetch:
+            on_chunk = None
+            if checkpointable:
+                base = cached  # snapshot before this gap; captured per iteration
+                on_chunk = lambda rows, base=base: _save_atomic(_merge_candles(base, rows), path)
+            fetched = _fetch(figi, timeframe, s, e, on_chunk=on_chunk)
+            cached = _merge_candles(cached, fetched.to_dict("records"))
+            _save_atomic(cached, path)
 
     mask = (cached["timestamp"] >= from_ts) & (cached["timestamp"] <= to_ts)
     return cached[mask].reset_index(drop=True)
