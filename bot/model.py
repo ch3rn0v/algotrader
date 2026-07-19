@@ -66,7 +66,8 @@ def build_predictions(
         assets=meta.get("assets"), timeframes=meta.get("timeframes"),
         primary_key=(model_asset, model_tf),
     )
-    features = build_features(all_candles, primary_asset=model_asset, primary_tf=model_tf)
+    features = build_features(all_candles, primary_asset=model_asset, primary_tf=model_tf,
+                              extended_assets=meta.get("extended_assets"))
     features = features.drop(columns=[c for c in features.columns if features[c].isna().all()])
     features = apply_recipes(features, meta.get("gen_recipes", []))
 

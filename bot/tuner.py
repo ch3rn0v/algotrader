@@ -1,17 +1,15 @@
 """Optuna hyperparameter tuning for the LightGBM return model.
 
-The train set is split temporally into sub-train / validation; the objective
-is the Pearson correlation between predicted and actual returns on the
-validation part. A duplicate guard prunes any trial whose sampled params
-exactly match an already-evaluated trial, so no parameter set is ever
-trained twice within a study.
+The objective is the mean Pearson correlation across forward-chaining
+time-series CV folds (see cv.py) within the train range. A duplicate guard
+prunes any trial whose sampled params exactly match an already-evaluated
+trial, so no parameter set is ever trained twice within a study.
 """
-import lightgbm as lgbm
 import numpy as np
 import optuna
 import pandas as pd
 
-VALID_RATIO = 0.2  # last 20% of train used for validation during tuning
+from cv import cv_corr
 
 FIXED_PARAMS = {
     "objective": "regression",
@@ -48,22 +46,18 @@ def _is_duplicate(trial: optuna.Trial) -> bool:
     return False
 
 
-def tune(X_train: pd.DataFrame, y_train: np.ndarray, n_trials: int = 30, seed: int = 0) -> dict:
-    """Return the best LightGBM params (fixed + tuned) found in n_trials."""
-    split = int(len(X_train) * (1 - VALID_RATIO))
-    X_sub, X_val = X_train.iloc[:split], X_train.iloc[split:]
-    y_sub, y_val = y_train[:split], y_train[split:]
-    print(f"[tune] sub-train {len(X_sub)} rows, valid {len(X_val)} rows, {n_trials} trials")
+def tune(X_train: pd.DataFrame, y_train: np.ndarray, n_trials: int = 30,
+         seed: int = 0, cv_folds: int = 5) -> dict:
+    """Return the best LightGBM params (fixed + tuned) found in n_trials,
+    scored by mean corr over `cv_folds` forward-chaining CV folds."""
+    print(f"[tune] {cv_folds}-fold timed CV on {len(X_train)} train rows, {n_trials} trials")
 
     def objective(trial: optuna.Trial) -> float:
         params = _suggest_params(trial)
         if _is_duplicate(trial):
             raise optuna.TrialPruned("duplicate parameter set")
-        model = lgbm.LGBMRegressor(**FIXED_PARAMS, **params)
-        model.fit(X_sub, y_sub)
-        pred = model.predict(X_val)
-        corr = np.corrcoef(y_val, pred)[0, 1]
-        return corr if np.isfinite(corr) else -1.0
+        corrs = cv_corr(X_train, y_train, {**FIXED_PARAMS, **params}, k=cv_folds)
+        return float(corrs.mean())
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction="maximize",
@@ -71,7 +65,7 @@ def tune(X_train: pd.DataFrame, y_train: np.ndarray, n_trials: int = 30, seed: i
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
     n_pruned = sum(t.state == optuna.trial.TrialState.PRUNED for t in study.trials)
-    print(f"[tune] best valid corr: {study.best_value:.4f} "
+    print(f"[tune] best mean CV corr: {study.best_value:.4f} "
           f"({n_pruned} duplicate trials pruned)")
     print(f"[tune] best params: {study.best_params}")
     return {**FIXED_PARAMS, **study.best_trial.params}

@@ -247,11 +247,18 @@ def build_features(
     all_candles: dict,
     primary_asset: str = PRIMARY_ASSET,
     primary_tf: str = PRIMARY_TF,
+    extended_assets: list[str] | None = None,
 ) -> pd.DataFrame:
     """Merge features from all (asset, timeframe) pairs onto the primary index.
 
     `primary_asset`/`primary_tf` default to the config values; pass a trained
     model's own primary when building features for it.
+
+    `extended_assets` lists the assets that receive the full extended feature
+    set (MACD, VWAP bands, diffs, lags, slopes, ...) at `primary_tf`; every
+    other (asset, timeframe) gets only the base set. Defaults to the primary
+    asset alone. Record this on the model and replay it at inference so the
+    feature columns line up.
 
     Primary series: feature values are shifted by one bar so that at
     decision time (start of bar t) only bar t-1 data is visible. Target is close[t]/close[t-1].
@@ -263,6 +270,8 @@ def build_features(
     The result has exactly one primary `timestamp` column. Each non-primary series
     also contributes a `{prefix}_ts` column recording which source bar was matched.
     """
+    ext_set = set(extended_assets) if extended_assets is not None else {primary_asset}
+
     base = all_candles[(primary_asset, primary_tf)].sort_values("timestamp").reset_index(drop=True)
     result = base[["timestamp"]].copy()
     prefixes = []
@@ -271,8 +280,8 @@ def build_features(
         prefix = f"{asset}_{tf.replace('min', 'm')}"
         prefixes.append(prefix)
         df = candles.sort_values("timestamp").reset_index(drop=True)
-        is_primary = asset == primary_asset and tf == primary_tf
-        feats = _raw_features(df, prefix, extended=is_primary)
+        extended = tf == primary_tf and asset in ext_set
+        feats = _raw_features(df, prefix, extended=extended)
 
         if asset == primary_asset and tf == primary_tf:
             # Target is close[t]/close[t-1], so features must only use bar t-1 data.

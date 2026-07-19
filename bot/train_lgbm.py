@@ -6,15 +6,20 @@ Pipeline:
      --min-base-corr before any pairwise generation
   3. iterative pairwise feature generation, fit on train only (feature_generator.py)
   4. greedy correlation-based feature selection on train only (feature_selector.py)
-  5. optuna hyperparameter tuning on a train/validation split (tuner.py)
-  6. final fit on the full train set, evaluation on the held-out test set
+  5. optuna tuning scored by forward-chaining timed CV inside train (tuner.py, cv.py)
+  6. final fit on the full train set, evaluation on the untouched holdout
+
+Train/holdout are split by date (--holdout-start), not by ratio: train is
+everything before it (default 2023-01 .. 2025-06), holdout is 2025-H2. The
+extended feature set is given to several instruments (--rich-assets), not just
+the primary.
 
 Target: close[t] / close[t-1] — return of the current primary bar (--tf).
 Metric: Pearson correlation between predicted and actual return.
 
 Usage (from repo root, with venv activated):
-    python3 bot/train_lgbm.py                     # full pipeline, config defaults
-    python3 bot/train_lgbm.py --tf 15min --timeframes 5min,15min,30min,1h
+    python3 bot/train_lgbm.py --tf 5min --timeframes 5min,15min,30min,1h
+    python3 bot/train_lgbm.py --rich-assets SBERP,PLZL,SIBN,PHOR --cv-folds 5
     python3 bot/train_lgbm.py --gen-iterations 0  # skip feature generation
     python3 bot/train_lgbm.py --trials 0          # skip tuning, use default params
 """
@@ -26,15 +31,33 @@ from datetime import datetime, timezone
 
 import lightgbm as lgbm
 import numpy as np
+import pandas as pd
 
 from candles import load_all_candles
-from config import ASSETS, FROM, MODEL_DIR, PRIMARY_ASSET, PRIMARY_TF, TIMEFRAMES, TO
+from config import ASSETS, MODEL_DIR, PRIMARY_ASSET, PRIMARY_TF, TIMEFRAMES
+from cv import cv_corr
 from feature_generator import apply_recipes, generate_features
 from feature_selector import select_features
 from features import build_features
 from tuner import tune
 
-TRAIN_RATIO = 0.3  # first 30% for training, last 70% for test
+# Default train/holdout boundary: train on everything before this date, hold
+# out everything from it on. Quality inside train is judged by timed CV.
+DEFAULT_FROM = "2023-01-04"
+DEFAULT_TO = "2026-06-29"
+DEFAULT_HOLDOUT_START = "2025-07-01"
+# Instruments that receive the full extended feature set. "all" = every asset
+# in the universe (heavy matrix, but that's the request).
+DEFAULT_RICH_ASSETS = "all"
+
+# Sub-periods to report corr for separately (label, start, end, in/out sample).
+REPORT_PERIODS = [
+    ("2023",    "2023-01-01", "2024-01-01", "train"),
+    ("2024",    "2024-01-01", "2025-01-01", "train"),
+    ("2025 H1", "2025-01-01", "2025-07-01", "train"),
+    ("2025 H2", "2025-07-01", "2026-01-01", "holdout"),
+    ("2026",    "2026-01-01", "2027-01-01", "holdout"),
+]
 
 max_depth = 4
 DEFAULT_LGBM_PARAMS = {
@@ -54,10 +77,15 @@ def parse_args():
     p.add_argument("--tf", default=PRIMARY_TF, help=f"primary timeframe to train on (default {PRIMARY_TF})")
     p.add_argument("--timeframes", default=",".join(TIMEFRAMES),
                    help="comma-separated timeframes to build features from (default: config TIMEFRAMES)")
-    p.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="start date YYYY-MM-DD (default: config FROM)")
-    p.add_argument("--to", dest="date_to", default=None, metavar="DATE", help="end date YYYY-MM-DD (default: config TO)")
-    p.add_argument("--min-base-corr", type=float, default=0.05,
-                   help="drop base features with |corr(train target)| below this before generation (0 = keep all, default 0.05)")
+    p.add_argument("--from", dest="date_from", default=DEFAULT_FROM, metavar="DATE", help=f"start date YYYY-MM-DD (default {DEFAULT_FROM})")
+    p.add_argument("--to", dest="date_to", default=DEFAULT_TO, metavar="DATE", help=f"end date YYYY-MM-DD (default {DEFAULT_TO})")
+    p.add_argument("--holdout-start", default=DEFAULT_HOLDOUT_START, metavar="DATE",
+                   help=f"first holdout date YYYY-MM-DD; train is everything before it (default {DEFAULT_HOLDOUT_START})")
+    p.add_argument("--cv-folds", type=int, default=5, help="forward-chaining CV folds inside the train range (default 5)")
+    p.add_argument("--rich-assets", default=DEFAULT_RICH_ASSETS,
+                   help=f"assets getting the extended feature set at --tf (default {DEFAULT_RICH_ASSETS})")
+    p.add_argument("--min-base-corr", type=float, default=0.03,
+                   help="drop base features with |corr(train target)| below this before generation (0 = keep all, default 0.03)")
     p.add_argument("--gen-iterations", type=int, default=2, help="feature generator iterations (0 = skip, default 2)")
     p.add_argument("--min-target-corr", type=float, default=0.02, help="generator: discard candidates below this |corr| with target (default 0.02)")
     p.add_argument("--gen-max-new", type=int, default=200, help="generator: max new features kept per iteration (default 200)")
@@ -67,20 +95,32 @@ def parse_args():
     return p.parse_args()
 
 
+def _parse_date(s: str) -> datetime:
+    return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
 def main():
     args = parse_args()
     tf = args.tf
     tfs = args.timeframes.split(",")
-    from_dt = datetime.strptime(args.date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_from else FROM
-    to_dt = datetime.strptime(args.date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_to else TO
+    if args.rich_assets.strip() == "all":
+        rich_assets = list(ASSETS)
+    else:
+        rich_assets = [a for a in args.rich_assets.split(",") if a]
+        unknown = [a for a in rich_assets if a not in ASSETS]
+        if unknown:
+            raise SystemExit(f"--rich-assets not in config ASSETS: {unknown}")
+    from_dt = _parse_date(args.date_from)
+    to_dt = _parse_date(args.date_to)
+    holdout_start = _parse_date(args.holdout_start)
 
     # 1. Download / load candles (cache is handled by get_candles)
     print(f"Loading {len(ASSETS) * len(tfs)} candle series...")
     all_candles = load_all_candles(from_dt, to_dt, timeframes=tfs)
 
-    # 2. Build feature matrix
-    print("\nBuilding features...")
-    features = build_features(all_candles, primary_tf=tf)
+    # 2. Build feature matrix (extended features for the rich assets at --tf)
+    print(f"\nBuilding features (extended set for {rich_assets})...")
+    features = build_features(all_candles, primary_tf=tf, extended_assets=rich_assets)
     primary = all_candles[(PRIMARY_ASSET, tf)].sort_values("timestamp").reset_index(drop=True)
     features.loc[:, "target"] = (primary["close"] / primary["close"].shift(1)).values
 
@@ -110,16 +150,19 @@ def main():
 
     y = features["target"].to_numpy()
 
-    # 3. Temporal train/test split — no shuffling
-    split = int(len(features) * TRAIN_RATIO)
-    if split == 0:
+    # 3. Date-based train/holdout split (rows are time-sorted, so train is a prefix).
+    is_train = (features["timestamp"] < holdout_start).to_numpy()
+    split = int(is_train.sum())
+    if split == 0 or split == len(features):
         raise RuntimeError(
-            f"TRAIN_RATIO={TRAIN_RATIO} yields 0 training rows from {len(features)} total. "
-            f"Increase TRAIN_RATIO or extend the date range."
+            f"holdout-start {args.holdout_start} puts all rows on one side "
+            f"({split} train / {len(features) - split} holdout). Adjust the dates."
         )
+    if not (is_train[:split].all() and not is_train[split:].any()):
+        raise RuntimeError("train rows are not a contiguous time prefix — data not sorted?")
     y_train, y_test = y[:split], y[split:]
-    print(f"\nTrain: {split} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
-    print(f"Test:  {len(features) - split} rows  ({features['timestamp'].iloc[split]} → {features['timestamp'].iloc[-1]})")
+    print(f"\nTrain:   {split} rows  ({features['timestamp'].iloc[0]} → {features['timestamp'].iloc[split - 1]})")
+    print(f"Holdout: {len(features) - split} rows  ({features['timestamp'].iloc[split]} → {features['timestamp'].iloc[-1]})")
 
     # 4. Base-feature prefilter — train rows only. Drops unpromising features
     # before the (quadratic) pairwise generator sees them.
@@ -171,28 +214,48 @@ def main():
     X = features[feature_cols]
     X_train, X_test = X.iloc[:split], X.iloc[split:]
 
-    # 7. Hyperparameter tuning on a temporal train/validation split.
+    # 7. Hyperparameter tuning scored by timed CV inside the train range.
     if args.trials > 0:
         print("\nTuning hyperparameters...")
-        lgbm_params = tune(X_train, y_train, n_trials=args.trials)
+        lgbm_params = tune(X_train, y_train, n_trials=args.trials, cv_folds=args.cv_folds)
     else:
         lgbm_params = dict(DEFAULT_LGBM_PARAMS)
 
-    # 8. Final fit on the full train set.
+    # 8. Timed cross-validation of the chosen params (the honest in-train score).
+    print(f"\n{args.cv_folds}-fold timed CV of chosen params...")
+    cv_scores = cv_corr(X_train, y_train, lgbm_params, k=args.cv_folds)
+    cv_mean, cv_std = float(cv_scores.mean()), float(cv_scores.std())
+    print(f"CV corr per fold: {[round(c, 4) for c in cv_scores]}")
+    print(f"CV corr mean:   {cv_mean:.4f} ± {cv_std:.4f}")
+
+    # 9. Final fit on the full train set, evaluate on the untouched holdout.
     print(f"\nTraining LightGBM ({lgbm_params['n_estimators']} trees, max_depth={lgbm_params['max_depth']})...")
     t0 = time.time()
     model = lgbm.LGBMRegressor(**lgbm_params)
     model.fit(X_train, y_train)
     train_time = time.time() - t0
 
-    # 9. Evaluate
     pred_train = model.predict(X_train)
     pred_test = model.predict(X_test)
     corr_train = float(np.corrcoef(y_train, pred_train)[0, 1])
     corr_test = float(np.corrcoef(y_test, pred_test)[0, 1])
     print(f"\nTraining time:  {train_time:.1f}s")
-    print(f"Corr (train):   {corr_train:.4f}")
-    print(f"Corr (test):    {corr_test:.4f}")
+    print(f"Corr (train):    {corr_train:.4f}")
+    print(f"Corr (holdout):  {corr_test:.4f}   (all rows from {args.holdout_start})")
+
+    # Per-period corr: predictions over every row, sliced by calendar period.
+    all_pred = np.concatenate([pred_train, pred_test])
+    ts = features["timestamp"]
+    period_corr = {}
+    print("\nCorr by period:")
+    for label, lo, hi, kind in REPORT_PERIODS:
+        mask = ((ts >= pd.Timestamp(lo, tz="UTC")) & (ts < pd.Timestamp(hi, tz="UTC"))).to_numpy()
+        n = int(mask.sum())
+        if n < 2:
+            continue
+        c = float(np.corrcoef(y[mask], all_pred[mask])[0, 1])
+        period_corr[label] = {"corr": round(c, 6), "n": n, "kind": kind}
+        print(f"  {label:8} ({kind:7}) {n:>7} rows   corr {c:.4f}")
 
     # 10. Save model
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -222,9 +285,10 @@ def main():
         "primary_tf": tf,
         "assets": ASSETS,
         "timeframes": tfs,
+        "extended_assets": rich_assets,
         "from": from_dt.isoformat(),
         "to": to_dt.isoformat(),
-        "train_ratio": TRAIN_RATIO,
+        "holdout_start": holdout_start.isoformat(),
         "train_end_ts": str(features["timestamp"].iloc[split - 1]),
         "n_train": len(X_train),
         "n_test": len(X_test),
@@ -235,9 +299,15 @@ def main():
         "gen_recipes": recipes,
         "feature_cols": feature_cols,
         "tuning_trials": args.trials,
+        "cv_folds": args.cv_folds,
+        "cv_corr_folds": [round(float(c), 6) for c in cv_scores],
+        "cv_corr_mean": round(cv_mean, 6),
+        "cv_corr_std": round(cv_std, 6),
         "lgbm_params": lgbm_params,
         "corr_train": round(corr_train, 6),
-        "corr_test": round(corr_test, 6),
+        "corr_holdout": round(corr_test, 6),
+        "corr_test": round(corr_test, 6),  # kept for tools that read corr_test
+        "period_corr": period_corr,
         "train_time_s": round(train_time, 2),
     }
     meta_path.write_text(json.dumps(meta, indent=2))
