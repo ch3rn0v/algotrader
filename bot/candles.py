@@ -48,21 +48,32 @@ def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp
     retry_counts = {status: 0 for status in _RETRY_DELAYS}
     while True:
         try:
+            # get_all_candles pages through the API lazily; a multi-year range
+            # is many sequential requests, so stream and log progress instead
+            # of blocking silently on list(...).
+            print(f"    fetching {figi} {timeframe} {from_ts.date()}..{to_ts.date()} "
+                  f"from API...", flush=True)
+            rows = []
             with Client(os.environ["TBANK_TOKEN"]) as client:
-                raw = list(client.get_all_candles(
+                for c in client.get_all_candles(
                     instrument_id=figi,
                     from_=from_ts.to_pydatetime(),
                     to=to_ts.to_pydatetime(),
                     interval=_INTERVALS[timeframe],
-                ))
-            return pd.DataFrame([{
-                "timestamp": _utc(c.time),
-                "open":  _q(c.open),
-                "high":  _q(c.high),
-                "low":   _q(c.low),
-                "close": _q(c.close),
-                "volume": c.volume,
-            } for c in raw])
+                ):
+                    rows.append({
+                        "timestamp": _utc(c.time),
+                        "open":  _q(c.open),
+                        "high":  _q(c.high),
+                        "low":   _q(c.low),
+                        "close": _q(c.close),
+                        "volume": c.volume,
+                    })
+                    if len(rows) % 5000 == 0:
+                        print(f"      ...{len(rows)} candles so far "
+                              f"(through {rows[-1]['timestamp'].date()})", flush=True)
+            print(f"    done: {len(rows)} candles for {figi} {timeframe}", flush=True)
+            return pd.DataFrame(rows)
         except RequestError as e:
             err = str(e)
             for status, delays in _RETRY_DELAYS.items():
@@ -70,7 +81,8 @@ def _fetch(figi: str, timeframe: str, from_ts: pd.Timestamp, to_ts: pd.Timestamp
                     n = retry_counts[status]
                     if n < len(delays):
                         retry_counts[status] += 1
-                        print(f"  {status} — retrying in {delays[n]}s (attempt {n + 1}/{len(delays)})...")
+                        print(f"  {status} — retrying in {delays[n]}s "
+                              f"(attempt {n + 1}/{len(delays)})...", flush=True)
                         time.sleep(delays[n])
                         break
                     raise RuntimeError(
@@ -104,6 +116,13 @@ def get_candles(figi: str, timeframe: str, from_dt, to_dt) -> pd.DataFrame:
             to_fetch.append((cached["timestamp"].max(), to_ts))
 
     if to_fetch:
+        if cached.empty:
+            print(f"  {figi} {timeframe}: no local cache", flush=True)
+        else:
+            print(f"  {figi} {timeframe}: cache covers "
+                  f"{cached['timestamp'].min().date()}..{cached['timestamp'].max().date()}", flush=True)
+        for s, e in to_fetch:
+            print(f"    gap to fetch: {s.date()}..{e.date()}", flush=True)
         fetched = pd.concat([_fetch(figi, timeframe, s, e) for s, e in to_fetch], ignore_index=True)
         cached = (pd.concat([cached, fetched], ignore_index=True)
                   .drop_duplicates("timestamp")

@@ -55,17 +55,20 @@ def main():
     if args.tickers or args.figis:
         figis = {}
         if args.tickers:
-            print("Resolving tickers...")
+            print("Resolving tickers...", flush=True)
             figis.update(_resolve_tickers(args.tickers.split(",")))
         for f in (args.figis.split(",") if args.figis else []):
             figis[f] = f
+        print(f"Downloading {len(figis)} instrument(s) x {len(tfs)} timeframe(s), "
+              f"{from_dt.date()}..{to_dt.date()}", flush=True)
         for label, figi in figis.items():
             for tf in tfs:
+                print(f"[{label} {tf}] requesting...", flush=True)
                 df = get_candles(figi, tf, from_dt, to_dt)
-                print(f"  {label} {tf}: {len(df)} bars")
+                print(f"[{label} {tf}] -> {len(df)} bars in range", flush=True)
     else:
         load_all_candles(from_dt, to_dt, timeframes=tfs)
-    print("Done.")
+    print("Done.", flush=True)
 
 
 if __name__ == "__main__":
