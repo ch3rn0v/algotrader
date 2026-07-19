@@ -150,14 +150,15 @@ def run_backtest(
                          peak_exposure, total_fees, initial_cash)
 
 
-def predictions_for_1min(candles_1m: pd.DataFrame, from_dt, to_dt) -> tuple[np.ndarray | None, dict | None]:
-    """Map the latest model's predictions onto 1min bars.
+def predictions_for_exec(candles_exec: pd.DataFrame, from_dt, to_dt) -> tuple[np.ndarray | None, dict | None]:
+    """Map the latest model's predictions onto the execution bars.
 
     Reads the model's own timeframe from its meta, builds predictions on that
-    series, then assigns each 1min bar the prediction of the primary-TF block
-    it falls into (merge_asof backward). That prediction was computed from
-    bars completed before the block started, so using it anywhere inside the
-    block adds no lookahead.
+    series, then assigns each execution bar the prediction of the primary-TF
+    block it falls into (merge_asof backward). That prediction was computed
+    from bars completed before the block started, so using it anywhere inside
+    the block adds no lookahead. When the execution TF equals the model TF the
+    merge is an exact 1:1 match.
     """
     loaded = load_latest_model()
     if loaded is None:
@@ -169,7 +170,7 @@ def predictions_for_1min(candles_1m: pd.DataFrame, from_dt, to_dt) -> tuple[np.n
     if preds_m is None:
         return None, None
     pred_df = pd.DataFrame({"timestamp": df_m["timestamp"], "pred": preds_m})
-    merged = pd.merge_asof(candles_1m[["timestamp"]], pred_df, on="timestamp", direction="backward")
+    merged = pd.merge_asof(candles_exec[["timestamp"]], pred_df, on="timestamp", direction="backward")
     return merged["pred"].fillna(1.0).to_numpy(), meta
 
 
@@ -179,6 +180,9 @@ def main():
     parser.add_argument("--z-entry",   type=float, default=2.0)
     parser.add_argument("--max-hold",  type=int,   default=45, help="time stop in bars (0 = off)")
     parser.add_argument("--pred-gain", type=float, default=1.0, help="model tilt scale (0 = ignore model)")
+    parser.add_argument("--exec-tf",   default="1min", help="execution candle timeframe (default 1min)")
+    parser.add_argument("--figi",      default=PRIMARY_FIGI, help=f"instrument FIGI to trade (default {PRIMARY_ASSET})")
+    parser.add_argument("--no-model",  action="store_true", help="skip the model entirely (no tilt, no test-period restriction)")
     parser.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="Start date YYYY-MM-DD (default: config FROM)")
     parser.add_argument("--to",   dest="date_to",   default=None, metavar="DATE", help="End date YYYY-MM-DD (default: config TO)")
     args = parser.parse_args()
@@ -186,10 +190,15 @@ def main():
     from_dt = datetime.strptime(args.date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_from else FROM
     to_dt = datetime.strptime(args.date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_to else TO
 
-    candles = get_candles(PRIMARY_FIGI, "1min", from_dt, to_dt)
-    print(f"1min candles: {len(candles)}")
+    candles = get_candles(args.figi, args.exec_tf, from_dt, to_dt)
+    print(f"{args.exec_tf} candles: {len(candles)}")
 
-    predictions, meta = predictions_for_1min(candles, from_dt, to_dt)
+    if args.no_model:
+        predictions, meta = None, None
+    else:
+        if args.figi != PRIMARY_FIGI:
+            parser.error("--figi is only supported with --no-model (the model is SBERP-specific)")
+        predictions, meta = predictions_for_exec(candles, from_dt, to_dt)
 
     # Evaluate on the model's test period only (bars after the train cutoff).
     if predictions is not None:
@@ -217,7 +226,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     plot_results(
         candles, result["equity"], result["trades"], result["peak_exposure"],
-        symbol=f"{PRIMARY_ASSET} (z-rev test)", timeframe="1min",
+        symbol=f"{PRIMARY_ASSET} (z-rev test)", timeframe=args.exec_tf,
         path=out_dir / f"result_z_{ts}.png",
     )
 

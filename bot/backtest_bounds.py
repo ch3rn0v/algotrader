@@ -55,16 +55,17 @@ def vw_bands(candles: pd.DataFrame, alpha: float) -> tuple[np.ndarray, np.ndarra
     return vwh.to_numpy(), vwl.to_numpy()
 
 
-def bands_for_1min(candles_1m: pd.DataFrame, bounds_tf: str, alpha: float,
-                   from_dt, to_dt) -> tuple[np.ndarray, np.ndarray]:
-    """Return (vwh, vwl) aligned to the 1min bars.
+def bands_for_exec(candles_exec: pd.DataFrame, exec_tf: str, bounds_tf: str,
+                   alpha: float, from_dt, to_dt) -> tuple[np.ndarray, np.ndarray]:
+    """Return (vwh, vwl) aligned to the execution bars.
 
-    For a higher bounds_tf, bands are computed on that series and mapped onto
-    1min bars by bar END (merge_asof backward), so only completed higher-TF
-    bars are ever visible.
+    When bounds_tf equals exec_tf the bands are computed directly on the
+    execution series. For a higher bounds_tf they are computed on that series
+    and mapped onto the execution bars by bar END (merge_asof backward), so
+    only completed higher-TF bars are ever visible.
     """
-    if bounds_tf == "1min":
-        return vw_bands(candles_1m, alpha)
+    if bounds_tf == exec_tf:
+        return vw_bands(candles_exec, alpha)
 
     df_tf = get_candles(PRIMARY_FIGI, bounds_tf, from_dt, to_dt).sort_values("timestamp").reset_index(drop=True)
     vwh, vwl = vw_bands(df_tf, alpha)
@@ -72,7 +73,7 @@ def bands_for_1min(candles_1m: pd.DataFrame, bounds_tf: str, alpha: float,
         "timestamp": df_tf["timestamp"] + TF_DURATIONS[bounds_tf],  # bar end
         "vwh": vwh, "vwl": vwl,
     })
-    merged = pd.merge_asof(candles_1m[["timestamp"]], band_df, on="timestamp", direction="backward")
+    merged = pd.merge_asof(candles_exec[["timestamp"]], band_df, on="timestamp", direction="backward")
     return merged["vwh"].to_numpy(), merged["vwl"].to_numpy()
 
 
@@ -172,8 +173,9 @@ def run_backtest(
                          peak_exposure, total_fees, initial_cash)
 
 
-def predictions_for_1min(candles_1m: pd.DataFrame, from_dt, to_dt):
-    """Map the latest model's predictions onto 1min bars (see the z backtest)."""
+def predictions_for_exec(candles_exec: pd.DataFrame, from_dt, to_dt):
+    """Map the latest model's predictions onto the execution bars (see the z
+    backtest). An exact 1:1 match when the execution TF equals the model TF."""
     loaded = load_latest_model()
     if loaded is None:
         print("No model found. Running without predictions.")
@@ -184,28 +186,30 @@ def predictions_for_1min(candles_1m: pd.DataFrame, from_dt, to_dt):
     if preds_m is None:
         return None, None
     pred_df = pd.DataFrame({"timestamp": df_m["timestamp"], "pred": preds_m})
-    merged = pd.merge_asof(candles_1m[["timestamp"]], pred_df, on="timestamp", direction="backward")
+    merged = pd.merge_asof(candles_exec[["timestamp"]], pred_df, on="timestamp", direction="backward")
     return merged["pred"].fillna(1.0).to_numpy(), meta
 
 
 def main():
     parser = argparse.ArgumentParser(description="Volume-weighted-band mean reversion backtest (1min)")
-    parser.add_argument("--bounds-tf", default="1min", help="timeframe to build bands from (default 1min)")
+    parser.add_argument("--exec-tf", default="1min", help="execution candle timeframe (default 1min)")
+    parser.add_argument("--bounds-tf", default=None, help="timeframe to build bands from (default: same as exec-tf)")
     parser.add_argument("--alpha", type=float, default=0.05, help="EWM alpha for the bands (default 0.05)")
     parser.add_argument("--max-hold", type=int, default=0, help="time stop in bars (0 = off)")
     parser.add_argument("--pred-gain", type=float, default=1.0, help="model tilt scale (0 = ignore model)")
     parser.add_argument("--from", dest="date_from", default=None, metavar="DATE", help="Start date YYYY-MM-DD")
     parser.add_argument("--to", dest="date_to", default=None, metavar="DATE", help="End date YYYY-MM-DD")
     args = parser.parse_args()
+    bounds_tf = args.bounds_tf or args.exec_tf
 
     from_dt = datetime.strptime(args.date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_from else FROM
     to_dt = datetime.strptime(args.date_to, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.date_to else TO
 
-    candles = get_candles(PRIMARY_FIGI, "1min", from_dt, to_dt)
-    print(f"1min candles: {len(candles)}")
+    candles = get_candles(PRIMARY_FIGI, args.exec_tf, from_dt, to_dt)
+    print(f"{args.exec_tf} candles: {len(candles)}")
 
-    vwh, vwl = bands_for_1min(candles, args.bounds_tf, args.alpha, from_dt, to_dt)
-    predictions, meta = predictions_for_1min(candles, from_dt, to_dt)
+    vwh, vwl = bands_for_exec(candles, args.exec_tf, bounds_tf, args.alpha, from_dt, to_dt)
+    predictions, meta = predictions_for_exec(candles, from_dt, to_dt)
 
     if predictions is not None:
         train_end_ts = pd.Timestamp(meta["train_end_ts"])
@@ -218,7 +222,7 @@ def main():
     max_hold = args.max_hold if args.max_hold > 0 else None
     stats = run_backtest(candles, vwh, vwl, max_hold_bars=max_hold,
                          pred_gain=args.pred_gain, predictions=predictions, headless=True)
-    print(f"\nbounds_tf={args.bounds_tf}  alpha={args.alpha}  max_hold={args.max_hold}  pred_gain={args.pred_gain}")
+    print(f"\nexec_tf={args.exec_tf}  bounds_tf={bounds_tf}  alpha={args.alpha}  max_hold={args.max_hold}  pred_gain={args.pred_gain}")
     for k, v in stats.items():
         print(f"  {k}: {v}")
 
